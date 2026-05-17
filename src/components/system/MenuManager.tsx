@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Modal } from "@/components/ui/Modal";
 import { TreeSelect } from "@/components/ui/TreeSelect";
@@ -19,6 +19,7 @@ type MenuRecord = {
   orderNum: number;
   visible: boolean;
   status: "ACTIVE" | "DISABLED";
+  remark: string | null;
   level: number;
 };
 
@@ -67,7 +68,7 @@ export function MenuManager({
 
   const menuTree = useMemo(() => buildTree(menus), [menus]);
 
-  useMemo(() => {
+  useEffect(() => {
     setExpandedIds(collectParentNodeIds(menuTree));
   }, [menuTree]);
 
@@ -133,7 +134,7 @@ export function MenuManager({
       orderNum: menu.orderNum,
       visible: menu.visible,
       status: menu.status,
-      remark: "",
+      remark: menu.remark ?? "",
     });
     setIsModalOpen(true);
   }

@@ -23,6 +23,7 @@ export default async function SystemDeptsPage() {
         phone: item.phone,
         email: item.email,
         status: item.status,
+        remark: item.remark,
       }))}
       permissions={{
         create: hasPermission(user, "system:dept:create"),

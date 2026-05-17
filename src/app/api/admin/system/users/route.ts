@@ -97,6 +97,7 @@ export async function GET(request: Request) {
         roleNames: item.roles.map((role) => role.role.name),
         status: item.status,
         isAdmin: item.isAdmin,
+        remark: item.remark,
         createdAt: item.createdAt.toLocaleDateString("zh-CN"),
       })),
     });

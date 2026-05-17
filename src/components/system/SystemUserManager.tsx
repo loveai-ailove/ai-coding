@@ -17,6 +17,7 @@ type UserRecord = {
   roleIds: number[];
   roleNames: string[];
   status: "ACTIVE" | "DISABLED";
+  remark: string | null;
   createdAt: string;
 };
 
@@ -192,7 +193,7 @@ export function SystemUserManager({
       deptId: user.deptId ? String(user.deptId) : "",
       status: user.status,
       roleIds: user.roleIds,
-      remark: "",
+      remark: user.remark ?? "",
     });
     setIsModalOpen(true);
   }

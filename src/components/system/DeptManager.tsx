@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Modal } from "@/components/ui/Modal";
 import { TreeSelect } from "@/components/ui/TreeSelect";
@@ -17,6 +17,7 @@ type DeptRecord = {
   phone: string | null;
   email: string | null;
   status: "ACTIVE" | "DISABLED";
+  remark: string | null;
 };
 
 type DeptFormState = {
@@ -58,7 +59,7 @@ export function DeptManager({
 
   const deptTree = useMemo(() => buildTree(depts), [depts]);
 
-  useMemo(() => {
+  useEffect(() => {
     setExpandedIds(collectParentNodeIds(deptTree));
   }, [deptTree]);
 
@@ -121,7 +122,7 @@ export function DeptManager({
       phone: dept.phone ?? "",
       email: dept.email ?? "",
       status: dept.status,
-      remark: "",
+      remark: dept.remark ?? "",
     });
     setIsModalOpen(true);
   }

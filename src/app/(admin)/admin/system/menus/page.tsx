@@ -24,6 +24,7 @@ export default async function SystemMenusPage() {
         orderNum: item.orderNum,
         visible: item.visible,
         status: item.status,
+        remark: item.remark,
         level: levelMap.get(item.id) || 0,
       }))}
       permissions={{
