@@ -15,7 +15,7 @@ alwaysApply: false
 
 ## 技术前提
 
-- 技术栈：Next.js App Router + Prisma + MariaDB。
+- 技术栈：Next.js App Router + Prisma + MySQL。
 - 权限模型：用户 -> 角色 -> 菜单/按钮权限。
 - 数据范围：`SELF`、`DEPT`、`DEPT_AND_CHILD`、`ALL`。
 - 当前用户最终数据范围按激活角色中的最大范围汇总。
