@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE `sys_role` ADD COLUMN `data_scope` ENUM('SELF', 'DEPT', 'DEPT_AND_CHILD', 'ALL') NOT NULL DEFAULT 'DEPT_AND_CHILD';

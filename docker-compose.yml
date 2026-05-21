@@ -8,8 +8,6 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-PASSWORD}
       MYSQL_DATABASE: ${DATABASE_NAME:-ai_coding}
-      MYSQL_USER: ${DATABASE_USER:-root}
-      MYSQL_PASSWORD: ${DATABASE_PASSWORD:-PASSWORD}
     ports:
       - "${DATABASE_PORT:-3306}:3306"
     volumes:
