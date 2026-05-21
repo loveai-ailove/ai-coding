@@ -120,15 +120,15 @@ export function AdminSidebar({
       className="inline-flex items-center justify-center rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
       aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}
     >
-      <svg className="h-5 w-5 transition-transform" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M18.75 18.75 12 12m0 0L5.25 5.25M12 12l6.75-6.75M12 12 5.25 18.75" />
+      <svg className={`h-5 w-5 transition-transform ${collapsed ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
       </svg>
     </button>
   );
 
   const sidebarContent = (
     <>
-      <div className="flex items-center justify-between border-b border-gray-200 px-6 py-5">
+      <div className="flex items-center justify-between px-6 py-5">
         <Link href="/admin" className="text-lg font-semibold text-gray-900" onClick={onClose}>
           Admin System
         </Link>
