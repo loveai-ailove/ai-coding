@@ -3,11 +3,11 @@ version: "3.9"
 services:
   mysql:
     image: mysql:8.4
-    container_name: ai-coding-mysql
+    container_name: admin-system-mysql
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-PASSWORD}
-      MYSQL_DATABASE: ${DATABASE_NAME:-ai_coding}
+      MYSQL_DATABASE: ${DATABASE_NAME:-admin_system}
     ports:
       - "${DATABASE_PORT:-3306}:3306"
     volumes:
