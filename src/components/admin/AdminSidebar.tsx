@@ -156,7 +156,7 @@ export function AdminSidebar({
 
   return (
     <>
-      <aside className={`hidden shrink-0 border-r border-gray-200 bg-white lg:flex lg:flex-col transition-all duration-300 ${collapsed ? "w-12" : "w-56"}`}>
+      <aside className={`hidden shrink-0 border-r border-gray-200 bg-gray-50 lg:flex lg:flex-col transition-all duration-300 ${collapsed ? "w-12" : "w-56"}`}>
         {collapsed ? (
           <div className="flex h-full flex-col items-center py-5">
             {collapseToggle}
@@ -172,7 +172,7 @@ export function AdminSidebar({
             className="absolute inset-0 bg-black/50 transition-opacity"
             onClick={onClose}
           />
-          <aside className="absolute left-0 top-0 z-50 flex h-full w-64 flex-col bg-white shadow-xl">
+          <aside className="absolute left-0 top-0 z-50 flex h-full w-64 flex-col bg-gray-50 shadow-xl">
             {sidebarContent}
           </aside>
         </div>
