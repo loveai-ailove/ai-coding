@@ -1,22 +1,225 @@
-version: "3.9"
+# AI-Admin-System 基础设施容器配置
+# 包含以下服务：
+#   - MySQL: 3306 (RBAC 系统数据)
+#   - MongoDB: 27017 (知识库/工作流数据存储)
+#   - Redis: 6379 (缓存)
+#   - Milvus: 19530 (向量数据库)
+#   - MinIO: 9000/9001 (对象存储)
+#   - Code Sandbox: 3002 (工作流代码节点执行)
+
+x-code-sandbox-token: &x-code-sandbox-token 'codesandbox'
+
+networks:
+  ai-admin:
+    name: ai-admin-network
+
+volumes:
+  mysql-data:
+  mongo-data:
+  redis-data:
+  minio-data:
+  milvus-minio-data:
+  milvus-etcd-data:
+  milvus-data:
 
 services:
+  # ==================== MySQL ====================
   mysql:
     image: mysql:8.4
-    container_name: admin-system-mysql
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-PASSWORD}
-      MYSQL_DATABASE: ${DATABASE_NAME:-admin_system}
+    container_name: ai-admin-mysql
+    restart: always
     ports:
-      - "${DATABASE_PORT:-3306}:3306"
+      - 3306:3306
+    networks:
+      - ai-admin
+    environment:
+      - MYSQL_ROOT_PASSWORD=lb@2025
+      - MYSQL_DATABASE=admin_system
+      - MYSQL_CHARACTER_SET_SERVER=utf8mb4
+      - MYSQL_COLLATION_SERVER=utf8mb4_unicode_ci
     volumes:
-      - mysql_data:/var/lib/mysql
+      - mysql-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-PASSWORD}"]
+      test: ['CMD-SHELL', 'mysqladmin ping -h localhost -uroot -p"$MYSQL_ROOT_PASSWORD"']
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
+  # ==================== MongoDB ====================
+  mongo:
+    image: mongo:5.0.32
+    container_name: ai-admin-mongo
+    restart: always
+    ports:
+      - 27017:27017
+    networks:
+      - ai-admin
+    command: mongod --keyFile /data/mongodb.key --replSet rs0
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=lb
+      - MONGO_INITDB_ROOT_PASSWORD=lanbu2025
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ['CMD', 'mongo', '-u', 'lb', '-p', 'lanbu2025', '--authenticationDatabase', 'admin', '--eval', "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    entrypoint:
+      - bash
+      - -c
+      - |
+        openssl rand -base64 128 > /data/mongodb.key
+        chmod 400 /data/mongodb.key
+        chown 999:999 /data/mongodb.key
+        echo 'const isInited = rs.status().ok === 1
+        if(!isInited){
+          rs.initiate({
+              _id: "rs0",
+              members: [
+                  { _id: 0, host: "ai-admin-mongo:27017" }
+              ]
+          })
+        }' > /data/initReplicaSet.js
+        exec docker-entrypoint.sh "$$@" &
+        until mongo -u lb -p lanbu2025 --authenticationDatabase admin --eval "print('waited for connection')"; do
+          echo "Waiting for MongoDB to start..."
+          sleep 2
+        done
+        mongo -u lb -p lanbu2025 --authenticationDatabase admin /data/initReplicaSet.js
+        wait $$!
 
-volumes:
-  mysql_data:
+  # ==================== Redis ====================
+  redis:
+    image: redis:7.4-alpine
+    container_name: ai-admin-redis
+    ports:
+      - 6379:6379
+    networks:
+      - ai-admin
+    restart: always
+    command: |
+      redis-server --requirepass lanbu2025 --loglevel warning --maxclients 10000 --appendonly yes --save 60 10 --maxmemory 2gb --maxmemory-policy noeviction
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', 'lanbu2025', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - redis-data:/data
+
+  # ==================== Milvus 向量库 ====================
+  milvus-minio:
+    container_name: ai-admin-milvus-minio
+    image: minio/minio:latest
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    networks:
+      - ai-admin
+    volumes:
+      - milvus-minio-data:/minio_data
+    command: minio server /minio_data --console-address ":9002"
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus-etcd:
+    container_name: ai-admin-milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.5
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    networks:
+      - ai-admin
+    volumes:
+      - milvus-etcd-data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ['CMD', 'etcdctl', 'endpoint', 'health']
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    container_name: ai-admin-milvus
+    image: milvusdb/milvus:v2.4.3
+    command: ['milvus', 'run', 'standalone']
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: ai-admin-milvus-etcd:2379
+      MINIO_ADDRESS: ai-admin-milvus-minio:9000
+    ports:
+      - 19530:19530
+    networks:
+      - ai-admin
+    volumes:
+      - milvus-data:/var/lib/milvus
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9091/healthz']
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    depends_on:
+      - milvus-etcd
+      - milvus-minio
+
+  # ==================== MinIO 对象存储 ====================
+  minio:
+    image: minio/minio:latest
+    container_name: ai-admin-minio
+    restart: always
+    networks:
+      - ai-admin
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ==================== 代码沙箱 ====================
+  code-sandbox:
+    container_name: ai-admin-code-sandbox
+    image: ghcr.io/labring/fastgpt-code-sandbox:v4.14.11
+    ports:
+      - 3002:3000
+    networks:
+      - ai-admin
+    restart: always
+    environment:
+      LOG_ENABLE_CONSOLE: 'true'
+      LOG_CONSOLE_LEVEL: debug
+      LOG_OTEL_SERVICE_NAME: ai-admin-code-sandbox
+      SANDBOX_TOKEN: *x-code-sandbox-token
+      SANDBOX_MAX_TIMEOUT: 60000
+      SANDBOX_MAX_MEMORY_MB: 256
+      SANDBOX_POOL_SIZE: 20
+      CHECK_INTERNAL_IP: 'false'
+      SANDBOX_REQUEST_MAX_COUNT: 30
+      SANDBOX_REQUEST_TIMEOUT: 60000
+      SANDBOX_REQUEST_MAX_RESPONSE_MB: 10
+      SANDBOX_REQUEST_MAX_BODY_MB: 5
+      SANDBOX_JS_ALLOWED_MODULES: lodash,dayjs,moment,uuid,crypto-js,qs,url,querystring
+      SANDBOX_PYTHON_ALLOWED_MODULES: math,cmath,decimal,fractions,random,statistics,collections,array,heapq,bisect,queue,copy,itertools,functools,operator,string,re,difflib,textwrap,unicodedata,codecs,datetime,time,calendar,_strptime,json,csv,base64,binascii,struct,hashlib,hmac,secrets,uuid,typing,abc,enum,dataclasses,contextlib,pprint,weakref,numpy,pandas,matplotlib
+    healthcheck:
+      test: ['CMD', 'bun', '-e', "fetch('http://localhost:3000/health').then((res) => { if (!res.ok) throw new Error(String(res.status)); })"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
