@@ -149,15 +149,15 @@ function ToolbarIconButton({
 }) {
   const toneClass =
     tone === "danger"
-      ? "text-red-500 hover:border-red-200 hover:bg-red-50 hover:text-red-600"
-      : "text-gray-500 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600";
+      ? "bg-red-50 text-red-500 hover:bg-red-100 hover:text-red-600"
+      : "bg-blue-50 text-gray-600 hover:bg-blue-100 hover:text-blue-600";
 
   return (
     <button
       type="button"
       aria-label={label}
       onClick={onClick}
-      className={`flex h-8 min-w-[72px] items-center gap-2 rounded-lg border border-transparent bg-white px-2.5 text-xs font-medium transition ${toneClass}`}
+      className={`flex h-8 min-w-[72px] items-center gap-2 rounded-lg px-2.5 text-xs font-medium transition ${toneClass}`}
     >
       {children}
       <span>{label}</span>
@@ -181,7 +181,7 @@ function NodeActionToolbar({ actions }: { actions?: NodeActionHandlers }) {
           : "pointer-events-none opacity-0"
       }`}
     >
-      <div className="flex flex-col gap-1 rounded-xl border border-gray-200/90 bg-white/95 p-1 shadow-[0_8px_24px_rgba(15,23,42,0.12)] backdrop-blur-sm">
+      <div className="flex flex-col gap-0.5">
         {showEdit && (
           <ToolbarIconButton
             label="编辑"
@@ -597,8 +597,10 @@ function toWorkflowEdges(edges: Edge[]): any[] {
 function toReactFlowNodes(modules: any[]): CanvasNode[] {
   return ensureStartModule(modules).map((module) => {
     const m = normalizeWorkflowNode(module);
+    // 确保节点ID始终存在，避免React Flow初始化错误
+    const nodeId = m.nodeId || `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     return {
-    id: m.nodeId,
+    id: nodeId,
     type: m.flowNodeType || "chatNode",
     position: m.position || { x: 0, y: 0 },
     deletable: m.flowNodeType !== "workflowStart",
@@ -647,10 +649,29 @@ export function FlowCanvas({
   const didInitRef = useRef(false);
   const canvasNodesRef = useRef<CanvasNode[]>(rfNodes);
   const canvasEdgesRef = useRef<Edge[]>(rfEdges);
+  const isDraggingRef = useRef(false);
+  const lastSyncedNodesRef = useRef<CanvasNode[]>(rfNodes);
 
   useEffect(() => {
-    setCanvasNodes(rfNodes);
-    canvasNodesRef.current = rfNodes;
+    // 避免在拖动过程中重新同步节点，防止覆盖用户操作
+    if (isDraggingRef.current) {
+      return;
+    }
+    
+    // 只有当节点实际发生变化时才更新
+    const hasChanged = rfNodes.length !== lastSyncedNodesRef.current.length ||
+      rfNodes.some((node, index) => {
+        const lastNode = lastSyncedNodesRef.current[index];
+        return !lastNode || node.id !== lastNode.id || 
+          node.position.x !== lastNode.position.x || 
+          node.position.y !== lastNode.position.y;
+      });
+    
+    if (hasChanged) {
+      setCanvasNodes(rfNodes);
+      canvasNodesRef.current = rfNodes;
+      lastSyncedNodesRef.current = rfNodes;
+    }
   }, [rfNodes]);
 
   useEffect(() => {
@@ -733,14 +754,41 @@ export function FlowCanvas({
 
   const handleNodesChange: OnNodesChange = useCallback(
     (changes) => {
-      const nextNodes = applyNodeChanges(changes, canvasNodesRef.current);
-      canvasNodesRef.current = nextNodes;
-      setCanvasNodes(nextNodes);
+      // 检测是否是拖动操作
+      const isDragChange = changes.some(
+        (change) => change.type === "position" && change.dragging === true
+      );
+      const isDragEnd = changes.some(
+        (change) => change.type === "position" && change.dragging === false
+      );
+      
+      // 设置拖动标志
+      if (isDragChange) {
+        isDraggingRef.current = true;
+      }
+      if (isDragEnd) {
+        isDraggingRef.current = false;
+      }
+      
+      // 确保使用最新的节点状态，避免引用过时数据
+      const currentNodes = canvasNodesRef.current;
+      const nextNodes = applyNodeChanges(changes, currentNodes);
+      
+      // 验证节点数据完整性，确保所有节点都有有效的ID
+      const validatedNodes = nextNodes.map((node) => ({
+        ...node,
+        id: node.id || `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      }));
+      
+      canvasNodesRef.current = validatedNodes;
+      setCanvasNodes(validatedNodes);
+      lastSyncedNodesRef.current = validatedNodes;
+      
       const shouldSync = changes.some(
         (change) => change.type !== "dimensions" && change.type !== "select"
       );
       if (shouldSync) {
-        onNodesChange(toWorkflowModules(nextNodes as CanvasNode[]));
+        onNodesChange(toWorkflowModules(validatedNodes as CanvasNode[]));
       }
     },
     [onNodesChange]

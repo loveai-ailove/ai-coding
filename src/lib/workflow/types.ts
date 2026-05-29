@@ -135,6 +135,14 @@ export interface NodeDebugSnapshot {
   runningTime?: number;
   error?: string;
   timestamp: string;
+  /** LLM request details for AI nodes (chatNode, agent, etc.) */
+  llmRequest?: {
+    model: string;
+    messages: Array<{ role: string; content: string }>;
+    temperature?: number;
+    max_tokens?: number;
+    [key: string]: any;
+  };
 }
 
 export interface DispatchContext {

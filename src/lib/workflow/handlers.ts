@@ -98,8 +98,9 @@ export function getNodeRunParams(
 }
 
 function getHistories(historyCount: any, ctx: DispatchContext): Array<{ obj: "Human" | "AI"; value: string }> {
-  const count = typeof historyCount === "number" ? historyCount : 6;
-  return ctx.histories.slice(-Math.min(count, ctx.histories.length));
+  const rounds = typeof historyCount === "number" ? historyCount : 3;
+  const messageCount = rounds * 2; // Each round = 1 Human + 1 AI message
+  return ctx.histories.slice(-Math.min(messageCount, ctx.histories.length));
 }
 
 // ═══════════════════════════════════════════════
@@ -159,7 +160,13 @@ async function dispatchChatNode(props: ModuleDispatchProps): Promise<NodeDispatc
   const userChatInput = params[NodeInputKeyEnum.userChatInput] || ctx.userChatInput || "";
   const history = params[NodeInputKeyEnum.history];
   const isResponseAnswerText = params[NodeInputKeyEnum.isResponseAnswerText] !== false;
-  let quoteQA = params[NodeOutputKeyEnum.datasetQuoteQA] ?? ctx.variables[NodeOutputKeyEnum.datasetQuoteQA];
+  // Priority: connected edge value > global variables > empty
+  // Note: params may return [] (empty array from default value), which blocks ?? fallback.
+  // So we must explicitly check for empty arrays.
+  let quoteQA = params[NodeOutputKeyEnum.datasetQuoteQA];
+  if (!quoteQA || (Array.isArray(quoteQA) && quoteQA.length === 0)) {
+    quoteQA = ctx.variables[NodeOutputKeyEnum.datasetQuoteQA];
+  }
   if (typeof quoteQA === "string") {
     try {
       const parsed = JSON.parse(quoteQA);
@@ -195,12 +202,15 @@ async function dispatchChatNode(props: ModuleDispatchProps): Promise<NodeDispatc
     messages.push({ role: "user", content: userChatInput });
   }
 
-  const result = await chatCompletion({
+  const llmRequestParams = {
     model,
     messages,
     temperature,
     max_tokens: maxToken,
-  });
+    stream: false,
+  };
+
+  const result = await chatCompletion(llmRequestParams);
 
   const content = result.choices[0]?.message?.content || "";
 
@@ -216,6 +226,7 @@ async function dispatchChatNode(props: ModuleDispatchProps): Promise<NodeDispatc
       model,
       tokens: result.usage?.total_tokens || 0,
       query: userChatInput,
+      llmRequest: llmRequestParams,
     },
   };
 }

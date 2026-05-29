@@ -27,9 +27,6 @@ interface ExecutionLog {
 interface Message {
   obj: "Human" | "AI";
   value: string;
-  nodeResponses?: any[];
-  interactiveResponse?: any;
-  executionLogs?: ExecutionLog[];
   nodeSnapshots?: NodeSnapshot[];
 }
 
@@ -38,6 +35,7 @@ interface DebugInspectorProps {
   nodes: any[];
   edges: any[];
   onHighlightNode?: (nodeId: string | null) => void;
+  onShowNodeDetail?: (snapshots: NodeSnapshot[]) => void;
 }
 
 function safeRender(value: any): string {
@@ -78,7 +76,7 @@ function formatValue(value: any, maxLen = 80): string {
   return text.length > maxLen ? text.slice(0, maxLen) + "…" : text;
 }
 
-function NodeSnapshotCard({ snapshot, onClick }: { snapshot: NodeSnapshot; onClick?: () => void }) {
+function NodeSnapshotCard({ snapshot, onClick, onShowDetail }: { snapshot: NodeSnapshot; onClick?: () => void; onShowDetail?: (snapshots: NodeSnapshot[]) => void }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -96,6 +94,15 @@ function NodeSnapshotCard({ snapshot, onClick }: { snapshot: NodeSnapshot; onCli
         </div>
         <div className="flex items-center gap-2 text-gray-400 shrink-0">
           {snapshot.runningTime != null && <span>{snapshot.runningTime}s</span>}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onShowDetail?.([snapshot]);
+            }}
+            className="rounded px-1.5 py-0.5 text-[10px] text-blue-500 hover:bg-blue-50 hover:text-blue-700"
+          >
+            详情
+          </button>
           <svg className={`h-3 w-3 transition-transform ${expanded ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
           </svg>
@@ -145,17 +152,31 @@ export function DebugInspector({
   nodes,
   edges,
   onHighlightNode,
+  onShowNodeDetail,
 }: DebugInspectorProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [chatId, setChatId] = useState<string | null>(null);
-  const [selectedResponseIndex, setSelectedResponseIndex] = useState<number>(-1);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // 监听清空消息的自定义事件
+  useEffect(() => {
+    const handleClearEvent = () => {
+      setMessages([]);
+      setChatId(null);
+      onHighlightNode?.(null);
+    };
+
+    window.addEventListener('clearDebugMessages', handleClearEvent);
+    return () => {
+      window.removeEventListener('clearDebugMessages', handleClearEvent);
+    };
+  }, [onHighlightNode]);
 
   const handleSend = async () => {
     if (!input.trim() || loading) return;
@@ -189,13 +210,9 @@ export function DebugInspector({
           {
             obj: "AI",
             value: data.outputText || interactiveText,
-            nodeResponses: data.nodeResponses,
-            interactiveResponse: data.interactiveResponse,
-            executionLogs: data.executionLogs,
             nodeSnapshots: data.nodeSnapshots,
           },
         ]);
-        setSelectedResponseIndex(newIdx);
         if (data.chatId) setChatId(data.chatId);
       } else {
         const err = await res.json().catch(() => ({ error: "请求失败" }));
@@ -208,24 +225,9 @@ export function DebugInspector({
     }
   };
 
-  const handleClear = () => {
-    setMessages([]);
-    setChatId(null);
-    setSelectedResponseIndex(-1);
-    onHighlightNode?.(null);
-  };
-
-  const aiMessages = messages
-    .filter((m) => m.obj === "AI")
-    .map((m, idx) => ({ ...m, responseIdx: idx }));
-
   return (
     <div className="flex h-full">
-      <div className={`flex w-full h-full flex-col bg-white ${selectedResponseIndex >= 0 ? "w-1/2 border-r" : ""}`}>
-        <div className="flex items-center justify-between border-b px-4 py-2">
-          <h3 className="text-sm font-semibold text-gray-900">调试对话</h3>
-          <button onClick={handleClear} className="text-xs text-gray-400 hover:text-gray-600">清空</button>
-        </div>
+      <div className="flex w-full h-full flex-col bg-white">
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {messages.length === 0 && (
             <div className="py-8 text-center text-sm text-gray-400">发送消息测试工作流</div>
@@ -238,51 +240,17 @@ export function DebugInspector({
                   : "bg-gray-100 text-gray-800"
               }`}>
                 <div className="whitespace-pre-wrap">{msg.value}</div>
-                {msg.nodeResponses && msg.nodeResponses.length > 0 && (
-                  <div className="mt-2 border-t border-gray-200 pt-2">
-                    <div className="text-xs text-gray-400 mb-1">执行节点:</div>
-                    {msg.nodeResponses.map((nr: any, j: number) => (
-                      <div key={j} className="text-xs text-gray-500">
-                        {nr.error ? "❌" : "✅"} {nr.moduleName || nr.moduleType || "未知节点"}
-                        {nr.error && <span className="text-red-400"> - {nr.error}</span>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {msg.interactiveResponse && (
-                  <div className="mt-2 rounded-md bg-white/70 p-2 text-xs text-gray-600">
-                    <div className="font-medium text-gray-700">交互节点已暂停</div>
-                    <div className="mt-1">
-                      类型: {msg.interactiveResponse.type === "formInput" ? "表单输入" : "用户选择"}
-                    </div>
-                    {msg.interactiveResponse.params?.description && (
-                      <div className="mt-1 whitespace-pre-wrap">{msg.interactiveResponse.params.description}</div>
-                    )}
-                  </div>
-                )}
                 {msg.nodeSnapshots && msg.nodeSnapshots.length > 0 && (
                   <button
-                    onClick={() => setSelectedResponseIndex(i)}
+                    onClick={() => {
+                      if (onShowNodeDetail) {
+                        onShowNodeDetail(msg.nodeSnapshots);
+                      }
+                    }}
                     className="mt-2 text-xs text-blue-500 hover:text-blue-700"
                   >
                     查看节点详情 ({msg.nodeSnapshots.length} 个节点)
                   </button>
-                )}
-                {msg.executionLogs && msg.executionLogs.length > 0 && (
-                  <div className="mt-2 border-t border-gray-200 pt-2">
-                    <div className="mb-1 text-xs text-gray-400">执行日志:</div>
-                    <div className="max-h-24 space-y-0.5 overflow-y-auto rounded-md bg-white/70 p-1.5 text-[10px] leading-relaxed">
-                      {msg.executionLogs.map((log: any, index: number) => (
-                        <div key={index} className="text-gray-500">
-                          <span className={`inline-block rounded px-1 py-0 mr-1 font-medium ${statusBadge(log.status)}`}>
-                            {statusLabel(log.status)}
-                          </span>
-                          {log.moduleName || log.nodeId}
-                          {log.message ? ` · ${log.message}` : ""}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
                 )}
               </div>
             </div>
@@ -296,7 +264,7 @@ export function DebugInspector({
           )}
           <div ref={messagesEndRef} />
         </div>
-        <div className="border-t p-3">
+        <div className="p-3">
           <div className="flex gap-2">
             <input
               value={input}
@@ -316,35 +284,6 @@ export function DebugInspector({
           </div>
         </div>
       </div>
-      {selectedResponseIndex >= 0 && (() => {
-        const msg = messages[selectedResponseIndex];
-        const snapshots = msg?.nodeSnapshots || [];
-        return (
-          <div className="w-1/2 flex flex-col bg-gray-50">
-            <div className="flex items-center justify-between border-b bg-white px-4 py-2">
-              <h3 className="text-sm font-semibold text-gray-900">节点详情</h3>
-              <button
-                onClick={() => { setSelectedResponseIndex(-1); onHighlightNode?.(null); }}
-                className="text-xs text-gray-400 hover:text-gray-600"
-              >
-                关闭
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
-              {snapshots.length === 0 && (
-                <div className="py-8 text-center text-xs text-gray-400">暂无节点执行数据</div>
-              )}
-              {snapshots.map((snapshot) => (
-                <NodeSnapshotCard
-                  key={`${snapshot.nodeId}-${snapshot.timestamp}`}
-                  snapshot={snapshot}
-                  onClick={() => onHighlightNode?.(snapshot.nodeId)}
-                />
-              ))}
-            </div>
-          </div>
-        );
-      })()}
     </div>
   );
 }

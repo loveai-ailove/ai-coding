@@ -358,15 +358,38 @@ export class WorkflowQueue {
       };
 
       if (this.ctx.mode === "debug") {
+        const snapshotInputs = { ...resolvedInputs };
+
+        // For chat-related nodes, include the resolved history messages in the snapshot
+        // so users can verify that conversation history is being passed correctly.
+        const chatNodeTypes = [
+          FlowNodeTypeEnum.chatNode,
+          FlowNodeTypeEnum.agent,
+          FlowNodeTypeEnum.classifyQuestion,
+          FlowNodeTypeEnum.contentExtract,
+        ];
+        if (chatNodeTypes.includes(node.flowNodeType as FlowNodeTypeEnum)) {
+          const historyRounds = typeof snapshotInputs.history === "number" ? snapshotInputs.history : 3;
+          const messageCount = historyRounds * 2; // Each round = 1 Human + 1 AI message
+          const histLen = this.ctx.histories.length;
+          const resolvedHistories = this.ctx.histories.slice(-Math.min(messageCount, histLen));
+          if (resolvedHistories.length > 0) {
+            snapshotInputs["_resolvedHistories"] = resolvedHistories;
+          } else {
+            snapshotInputs["_resolvedHistories"] = [];
+          }
+        }
+
         this.nodeSnapshots.push({
           nodeId: node.nodeId,
           nodeName: node.name,
           nodeType: node.flowNodeType,
           status: "run",
-          resolvedInputs: resolvedInputs || {},
+          resolvedInputs: snapshotInputs,
           outputs: result.data || {},
           runningTime: nodeResponse.runningTime,
           timestamp: new Date().toISOString(),
+          llmRequest: nodeResponse.llmRequest,
         });
       }
 
