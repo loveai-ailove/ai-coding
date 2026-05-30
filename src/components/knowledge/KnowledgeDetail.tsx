@@ -10,6 +10,7 @@ interface Collection {
   tags: string[];
   fileExt?: string;
   fileSize?: number;
+  chunkSize?: number;
   rawTextLength?: number;
   createTime: string;
   dataCount?: number;
@@ -132,6 +133,7 @@ export function KnowledgeDetail({ datasetId }: { datasetId: string }) {
                     <p className="text-xs text-gray-400">
                       {col.dataCount ?? 0} 条数据 · {new Date(col.createTime).toLocaleDateString()}
                       {col.fileSize ? ` · ${Math.ceil(col.fileSize / 1024)} KB` : ""}
+                      {col.chunkSize ? ` · 分块大小 ${col.chunkSize}` : ""}
                     </p>
                   </div>
                 </div>
@@ -152,11 +154,11 @@ export function KnowledgeDetail({ datasetId }: { datasetId: string }) {
 }
 
 function CreateCollectionModal({ datasetId, chunkSize, onClose, onSuccess }: { datasetId: string; chunkSize: number; onClose: () => void; onSuccess: () => void }) {
-  const [tab, setTab] = useState<"text" | "link" | "file">("text");
+  const [tab, setTab] = useState<"text" | "file">("text");
   const [name, setName] = useState("");
   const [content, setContent] = useState("");
-  const [link, setLink] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [customChunkSize, setCustomChunkSize] = useState(chunkSize);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -174,14 +176,13 @@ function CreateCollectionModal({ datasetId, chunkSize, onClose, onSuccess }: { d
         formData.append("name", name || file.name);
         formData.append("type", "file");
         formData.append("file", file);
+        formData.append("chunkSize", String(customChunkSize));
         res = await fetch(`/api/knowledge/dataset/${datasetId}/collections`, {
           method: "POST",
           body: formData,
         });
       } else {
-        const body = tab === "text"
-          ? { name: name || "文本数据", type: "text", rawText: content, chunkSize }
-          : { name: name || link, type: "link", rawLink: link, chunkSize };
+        const body = { name: name || "文本数据", type: "text", rawText: content, chunkSize: customChunkSize };
         res = await fetch(`/api/knowledge/dataset/${datasetId}/collections`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -207,24 +208,22 @@ function CreateCollectionModal({ datasetId, chunkSize, onClose, onSuccess }: { d
         <h2 className="text-lg font-semibold text-gray-900">添加数据</h2>
         <div className="mt-4 flex gap-2">
           <button onClick={() => setTab("text")} className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "text" ? "bg-blue-50 text-blue-600" : "text-gray-500 hover:bg-gray-50"}`}>文本数据</button>
-          <button onClick={() => setTab("link")} className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "link" ? "bg-blue-50 text-blue-600" : "text-gray-500 hover:bg-gray-50"}`}>网页链接</button>
           <button onClick={() => setTab("file")} className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "file" ? "bg-blue-50 text-blue-600" : "text-gray-500 hover:bg-gray-50"}`}>文件上传</button>
         </div>
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
           {error ? <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">{error}</div> : null}
           <div>
             <label className="block text-sm font-medium text-gray-700">名称</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" placeholder={tab === "text" ? "文本数据" : tab === "link" ? "网页地址" : "文件名"} />
+            <input value={name} onChange={(e) => setName(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" placeholder={tab === "text" ? "文本数据" : "文件名"} />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700">分块大小</label>
+            <input type="number" value={customChunkSize} onChange={(e) => setCustomChunkSize(Number(e.target.value))} min={100} max={4096} step={100} className="mt-1 w-44 rounded-lg border border-gray-300 px-3 py-2 text-sm" />
           </div>
           {tab === "text" ? (
             <div>
               <label className="block text-sm font-medium text-gray-700">内容 <span className="text-red-500">*</span></label>
               <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={10} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono" placeholder="请输入文本内容..." />
-            </div>
-          ) : tab === "link" ? (
-            <div>
-              <label className="block text-sm font-medium text-gray-700">网页链接 <span className="text-red-500">*</span></label>
-              <input value={link} onChange={(e) => setLink(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" placeholder="https://example.com/article" />
             </div>
           ) : (
             <div className="space-y-3">
@@ -258,7 +257,9 @@ function CollectionChunksModal({ datasetId, collection, onClose }: { datasetId: 
         const res = await fetch(`/api/knowledge/dataset/${datasetId}/data?collectionId=${collection.id}&pageSize=200`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "获取分块详情失败");
-        setChunks(Array.isArray(data?.list) ? data.list : []);
+        const list = Array.isArray(data?.list) ? data.list : [];
+        list.sort((a: CollectionChunk, b: CollectionChunk) => a.chunkIndex - b.chunkIndex);
+        setChunks(list);
       } catch (e) {
         setError(e instanceof Error ? e.message : "获取分块详情失败");
       } finally {
@@ -267,12 +268,40 @@ function CollectionChunksModal({ datasetId, collection, onClose }: { datasetId: 
     })();
   }, [datasetId, collection.id]);
 
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}><div className="flex h-[80vh] w-full max-w-4xl flex-col rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}><div className="border-b px-6 py-4"><h2 className="text-lg font-semibold text-gray-900">{collection.name}</h2><p className="mt-1 text-sm text-gray-500">共 {chunks.length} 个分块</p></div><div className="flex-1 overflow-y-auto p-6">{error ? <div className="mb-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">{error}</div> : null}{loading ? <div className="py-16 text-center text-gray-400">加载中...</div> : chunks.length === 0 ? <div className="py-16 text-center text-gray-400">该集合暂无分块数据</div> : <div className="space-y-3">{chunks.map((item) => <div key={item.id} className="rounded-lg border border-gray-200 p-4"><div className="text-xs text-gray-400">Chunk #{item.chunkIndex + 1}</div><p className="mt-2 whitespace-pre-wrap text-sm text-gray-900">{item.q}</p>{item.a ? <p className="mt-2 text-sm text-gray-500">{item.a}</p> : null}</div>)}</div>}</div></div></div>;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div className="flex h-[80vh] w-full max-w-4xl flex-col rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">{collection.name}</h2>
+            <p className="mt-1 text-sm text-gray-500">共 {chunks.length} 个分块</p>
+          </div>
+          <button onClick={onClose} className="rounded p-1 text-gray-400 hover:bg-gray-100">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-6">
+          {error ? <div className="mb-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">{error}</div> : null}
+          {loading ? <div className="py-16 text-center text-gray-400">加载中...</div> : chunks.length === 0 ? <div className="py-16 text-center text-gray-400">该集合暂无分块数据</div> : (
+            <div className="space-y-3">
+              {chunks.map((item) => (
+                <div key={item.id} className="rounded-lg border border-gray-200 p-4">
+                  <div className="text-xs text-gray-400">Chunk #{item.chunkIndex + 1}</div>
+                  <p className="mt-2 whitespace-pre-wrap text-sm text-gray-900">{item.q}</p>
+                  {item.a ? <p className="mt-2 text-sm text-gray-500">{item.a}</p> : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function SearchTestPanel({ datasetId, onClose }: { datasetId: string; onClose: () => void }) {
   const [query, setQuery] = useState("");
-  const [similarity, setSimilarity] = useState(0);
+  const [similarity, setSimilarity] = useState(0.5);
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -303,13 +332,13 @@ function SearchTestPanel({ datasetId, onClose }: { datasetId: string; onClose: (
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div className="flex h-[80vh] w-full max-w-3xl flex-col rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b px-6 py-4">
+        <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
           <h2 className="text-lg font-semibold text-gray-900">搜索测试</h2>
           <button onClick={onClose} className="rounded p-1 text-gray-400 hover:bg-gray-100">
             <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
           </button>
         </div>
-        <div className="flex gap-3 border-b px-6 py-3">
+        <div className="flex gap-3 px-6 py-3">
           <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSearch()} className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm" placeholder="输入搜索内容..." />
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <span>相似度:</span>

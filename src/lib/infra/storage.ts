@@ -64,6 +64,23 @@ export async function ensureBuckets() {
   }
 }
 
+export async function deleteStorageObject(key: string) {
+  try {
+    await minioClient.removeObject(STORAGE_PRIVATE_BUCKET, key);
+  } catch {
+    // 静默处理：文件可能已经不存在
+  }
+}
+
+export async function deleteStorageObjects(keys: string[]) {
+  if (keys.length === 0) return;
+  try {
+    await minioClient.removeObjects(STORAGE_PRIVATE_BUCKET, keys);
+  } catch {
+    // 静默处理
+  }
+}
+
 export function getPublicUrl(key: string): string {
   const externalEndpoint = process.env.STORAGE_EXTERNAL_ENDPOINT || STORAGE_S3_ENDPOINT;
   return `${externalEndpoint}/${STORAGE_PUBLIC_BUCKET}/${key}`;

@@ -3,6 +3,7 @@ import { handleApiError } from "@/lib/api";
 import { requireKnowledgePermission } from "@/lib/auth/fastgpt-auth";
 import { getDatasetModel, getDatasetCollectionModel, getDatasetDataModel } from "@/lib/models/dataset";
 import { deleteVectors } from "@/lib/infra/milvus";
+import { deleteStorageObjects } from "@/lib/infra/storage";
 import { getRequiredAiModel, parseAiModelId } from "@/lib/ai/model-manager";
 import { AiModelType } from "@/generated/prisma/client";
 
@@ -161,6 +162,16 @@ export async function DELETE(
     await dataset.save();
 
     const CollectionModel = await getDatasetCollectionModel();
+    const collections = await CollectionModel.find({
+      datasetId: id,
+      userId: user.userId,
+      deleteTime: null,
+    }).lean();
+
+    const fileKeys = collections
+      .map((c) => (c as any).fileKey)
+      .filter(Boolean) as string[];
+
     await CollectionModel.updateMany(
       { datasetId: id, userId: user.userId, deleteTime: null },
       { deleteTime: new Date(), updateTime: new Date() }
@@ -184,6 +195,10 @@ export async function DELETE(
           ids: vectorIds,
         });
       }
+    }
+
+    if (fileKeys.length > 0) {
+      await deleteStorageObjects(fileKeys);
     }
 
     return NextResponse.json({ message: "删除成功" });

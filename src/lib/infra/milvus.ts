@@ -5,6 +5,14 @@ const MILVUS_TOKEN = process.env.MILVUS_TOKEN || "";
 
 declare global {
   var milvusClient: MilvusClient | undefined;
+  var milvusLoadedCollections: Set<string> | undefined;
+}
+
+function getLoadedCollections(): Set<string> {
+  if (!global.milvusLoadedCollections) {
+    global.milvusLoadedCollections = new Set();
+  }
+  return global.milvusLoadedCollections;
 }
 
 export function getMilvusClient(): MilvusClient | null {
@@ -33,6 +41,13 @@ function buildSafeKey(value: string) {
 
 function getCollectionName(teamId: string, embeddingModelId: string) {
   return `${VECTOR_COLLECTION_PREFIX}${buildSafeKey(teamId)}_${buildSafeKey(embeddingModelId)}`;
+}
+
+async function ensureCollectionLoaded(client: MilvusClient, collectionName: string) {
+  const loaded = getLoadedCollections();
+  if (loaded.has(collectionName)) return;
+  await client.loadCollection({ collection_name: collectionName });
+  loaded.add(collectionName);
 }
 
 export async function initVectorCollection(teamId: string, embeddingModelId: string, dim: number): Promise<string> {
@@ -66,6 +81,9 @@ export async function initVectorCollection(teamId: string, embeddingModelId: str
     params: { M: "16", efConstruction: "200" },
   });
 
+  await client.loadCollection({ collection_name: collectionName });
+  getLoadedCollections().add(collectionName);
+
   return collectionName;
 }
 
@@ -85,6 +103,7 @@ export async function insertVectors(params: {
   const collectionName = getCollectionName(params.teamId, params.embeddingModelId);
   const dim = params.vectors[0]?.vector.length || 0;
   await initVectorCollection(params.teamId, params.embeddingModelId, dim);
+  await ensureCollectionLoaded(client, collectionName);
 
   const data = params.vectors.map((v) => ({
     id: v.id,
@@ -132,7 +151,7 @@ export async function searchVectors(params: {
   const collectionName = getCollectionName(params.teamId, params.embeddingModelId);
   const has = await client.hasCollection({ collection_name: collectionName });
   if (!has.value) return [];
-  await client.loadCollection({ collection_name: collectionName });
+  await ensureCollectionLoaded(client, collectionName);
 
   let filter = params.filter || "";
   if (params.datasetIds && params.datasetIds.length > 0) {

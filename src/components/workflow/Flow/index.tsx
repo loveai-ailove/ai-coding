@@ -35,7 +35,7 @@ const START_NODE_POSITION = { x: 100, y: 200 };
 
 const NODE_TEMPLATES = [
   { type: "chatNode", label: "AI 对话", icon: "🤖", desc: "调用大模型生成回答", category: "ai" },
-  { type: "datasetSearchNode", label: "知识库搜索", icon: "📚", desc: "检索知识库内容供后续引用", category: "ai" },
+  { type: "datasetSearchNode", label: "知识库搜索", icon: "📚", desc: "检索个性化知识库内容", category: "ai" },
   { type: "ifElseNode", label: "条件分支", icon: "🔀", desc: "按条件命中不同分支", category: "logic" },
   { type: "httpRequest468", label: "HTTP 请求", icon: "🌐", desc: "调用外部接口获取数据", category: "tools" },
   { type: "formInput", label: "表单输入", icon: "📋", desc: "收集用户填写的信息", category: "interact" },
@@ -1001,6 +1001,7 @@ export function FlowCanvas({
           onConnect={onConnect}
           nodeTypes={nodeTypes}
           deleteKeyCode={["Backspace", "Delete"]}
+          defaultViewport={{ x: 0, y: 0, zoom: 1.44 }}
           defaultEdgeOptions={{
             markerEnd: {
               type: MarkerType.ArrowClosed,

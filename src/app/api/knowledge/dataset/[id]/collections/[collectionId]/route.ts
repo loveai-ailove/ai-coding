@@ -3,6 +3,7 @@ import { handleApiError } from "@/lib/api";
 import { requireKnowledgePermission } from "@/lib/auth/fastgpt-auth";
 import { getDatasetModel, getDatasetCollectionModel, getDatasetDataModel } from "@/lib/models/dataset";
 import { deleteVectors } from "@/lib/infra/milvus";
+import { deleteStorageObject } from "@/lib/infra/storage";
 
 export async function GET(
   _request: Request,
@@ -124,6 +125,10 @@ export async function DELETE(
       datasetId,
       userId: user.userId,
     });
+
+    if (collection.fileKey) {
+      await deleteStorageObject(collection.fileKey);
+    }
 
     await Dataset.updateOne(
       { _id: datasetId },

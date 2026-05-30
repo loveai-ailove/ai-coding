@@ -2,7 +2,7 @@ import mammoth from "mammoth";
 import xlsx from "node-xlsx";
 import { PDFParse } from "pdf-parse";
 
-function htmlToText(html: string) {
+export function htmlToText(html: string) {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")

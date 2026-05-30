@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createHash } from "crypto";
 import { nanoid } from "nanoid";
 import { handleApiError } from "@/lib/api";
 import { requireKnowledgePermission } from "@/lib/auth/fastgpt-auth";
@@ -6,23 +7,16 @@ import { getDatasetModel, getDatasetCollectionModel, getDatasetDataModel } from 
 import { insertVectors } from "@/lib/infra/milvus";
 import { getEmbedding } from "@/lib/ai/embedding";
 import { resolveEmbeddingRuntimeModel } from "@/lib/ai/runtime-model";
-import { assertSupportedKnowledgeFile, parseKnowledgeFile } from "@/lib/knowledge/file-parser";
+import { assertSupportedKnowledgeFile, parseKnowledgeFile, htmlToText } from "@/lib/knowledge/file-parser";
 import { ensureBuckets, getPrivateUrl, minioClient, STORAGE_PRIVATE_BUCKET } from "@/lib/infra/storage";
 
-function htmlToText(html: string) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+const MAX_FILE_SIZE = 20 * 1024 * 1024;
+const EMBEDDING_BATCH_SIZE = 50;
+const EMBEDDING_MAX_RETRIES = 3;
 
 function splitTextChunks(text: string, chunkSize: number, overlap: number, splitter?: string): string[] {
+  const safeOverlap = Math.min(overlap, Math.floor(chunkSize / 2));
+
   if (splitter && text.includes(splitter)) {
     const parts = text.split(splitter).filter((s) => s.trim());
     const chunks: string[] = [];
@@ -31,8 +25,9 @@ function splitTextChunks(text: string, chunkSize: number, overlap: number, split
       const candidate = current ? current + splitter + part : part;
       if (candidate.length > chunkSize && current) {
         chunks.push(current);
-        const overlapText = current.slice(-overlap);
-        current = overlapText + splitter + part;
+        const overlapLength = Math.min(safeOverlap, current.length);
+        const overlapText = overlapLength > 0 ? current.slice(-overlapLength) : "";
+        current = overlapText ? overlapText + splitter + part : part;
       } else {
         current = candidate;
       }
@@ -49,9 +44,53 @@ function splitTextChunks(text: string, chunkSize: number, overlap: number, split
     const end = Math.min(start + chunkSize, text.length);
     chunks.push(text.slice(start, end));
     if (end >= text.length) break;
-    start = end - overlap;
+    start = end - safeOverlap;
   }
   return chunks.filter((c) => c.trim());
+}
+
+async function getEmbeddingWithRetry(
+  model: string,
+  texts: string[],
+  runtimeConfig: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    defaultConfig?: Record<string, any> | null;
+  }
+): Promise<number[][]> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < EMBEDDING_MAX_RETRIES; attempt++) {
+    try {
+      return await getEmbedding(model, texts, runtimeConfig);
+    } catch (err) {
+      lastError = err;
+      if (attempt < EMBEDDING_MAX_RETRIES - 1) {
+        const delay = Math.pow(2, attempt) * 1000;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function embedTextsInBatches(
+  model: string,
+  texts: string[],
+  runtimeConfig: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    defaultConfig?: Record<string, any> | null;
+  }
+): Promise<number[][]> {
+  const allEmbeddings: number[][] = [];
+  for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
+    const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
+    const batchEmbeddings = await getEmbeddingWithRetry(model, batch, runtimeConfig);
+    allEmbeddings.push(...batchEmbeddings);
+  }
+  return allEmbeddings;
 }
 
 async function processTextToVectors(params: {
@@ -71,18 +110,22 @@ async function processTextToVectors(params: {
   }
 
   const DatasetData = await getDatasetDataModel();
-  const dataDocs: Array<{ _id: any; q: string; indexes: Array<{ dataId: string; text: string }> }> = [];
-  const vectorEntries: Array<{ id: string; datasetId: string; collectionId: string; dataId: string; vector: number[] }> = [];
   const embeddingModel = await resolveEmbeddingRuntimeModel(params.embeddingModelId);
-  const embeddings = await getEmbedding(embeddingModel.model, chunks, {
+  const runtimeConfig = {
     baseUrl: embeddingModel.baseUrl,
     apiKey: embeddingModel.apiKey,
     model: embeddingModel.model,
     defaultConfig: embeddingModel.defaultConfig
-  });
+  };
+
+  const embeddings = await embedTextsInBatches(embeddingModel.model, chunks, runtimeConfig);
+
+  const dataDocs: Array<{ _id: any; q: string; indexes: Array<{ dataId: string; text: string }> }> = [];
+  const vectorEntries: Array<{ id: string; datasetId: string; collectionId: string; dataId: string; vector: number[] }> = [];
+
+  const createdDocIds: any[] = [];
 
   for (let i = 0; i < chunks.length; i++) {
-    const dataId = nanoid();
     const vectorId = nanoid();
 
     const doc = await DatasetData.create({
@@ -95,6 +138,7 @@ async function processTextToVectors(params: {
       chunkIndex: i,
     });
 
+    createdDocIds.push(doc._id);
     dataDocs.push(doc);
     vectorEntries.push({
       id: vectorId,
@@ -106,11 +150,18 @@ async function processTextToVectors(params: {
   }
 
   if (vectorEntries.length > 0) {
-    await insertVectors({
-      teamId: params.userId,
-      embeddingModelId: params.embeddingModelId,
-      vectors: vectorEntries
-    });
+    try {
+      await insertVectors({
+        teamId: params.userId,
+        embeddingModelId: params.embeddingModelId,
+        vectors: vectorEntries
+      });
+    } catch (err) {
+      if (createdDocIds.length > 0) {
+        await DatasetData.deleteMany({ _id: { $in: createdDocIds } }).catch(() => {});
+      }
+      throw err;
+    }
   }
 
   return { dataCount: chunks.length, chunks };
@@ -186,6 +237,7 @@ export async function GET(
         tags: item.tags,
         fileExt: item.fileExt,
         fileSize: item.fileSize,
+        chunkSize: item.chunkSize,
         rawLink: item.rawLink,
         rawTextLength: item.rawTextLength,
         createTime: item.createTime,
@@ -226,6 +278,7 @@ export async function POST(
     let rawLink = "";
     let tags: string[] = [];
     let uploadFile: File | null = null;
+    let customChunkSize: number | undefined;
 
     if (contentType.includes("multipart/form-data")) {
       const formData = await request.formData();
@@ -235,6 +288,8 @@ export async function POST(
       rawLink = String(formData.get("rawLink") || "");
       const rawTags = String(formData.get("tags") || "");
       tags = rawTags ? rawTags.split(",").map((item) => item.trim()).filter(Boolean) : [];
+      const rawChunkSize = String(formData.get("chunkSize") || "");
+      customChunkSize = rawChunkSize ? parseInt(rawChunkSize) : undefined;
       const file = formData.get("file");
       if (file instanceof File) {
         uploadFile = file;
@@ -246,6 +301,7 @@ export async function POST(
       rawText = String(body.rawText || "");
       rawLink = String(body.rawLink || "");
       tags = Array.isArray(body.tags) ? body.tags : [];
+      customChunkSize = typeof body.chunkSize === "number" ? body.chunkSize : undefined;
     }
 
     if (!type || !["text", "link", "file"].includes(type)) {
@@ -261,6 +317,7 @@ export async function POST(
     let fileExt = "";
     let fileSize = 0;
     let mimeType = "";
+    let hashRawText = "";
 
     if (type === "link") {
       if (!collectionName.trim()) {
@@ -285,6 +342,9 @@ export async function POST(
       if (!uploadFile) {
         throw new Error("请上传文件");
       }
+      if (uploadFile.size > MAX_FILE_SIZE) {
+        throw new Error(`文件大小超过限制，最大支持 ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB`);
+      }
       fileExt = assertSupportedKnowledgeFile(uploadFile.name);
       mimeType = uploadFile.type || "application/octet-stream";
       fileSize = uploadFile.size;
@@ -294,6 +354,8 @@ export async function POST(
       if (!content.trim()) {
         throw new Error("文件内容解析为空，请检查文件格式或内容");
       }
+
+      hashRawText = createHash("sha256").update(content).digest("hex");
 
       await ensureBuckets();
       const safeName = uploadFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -312,6 +374,10 @@ export async function POST(
       throw new Error("内容不能为空");
     }
 
+    if (type !== "file") {
+      hashRawText = createHash("sha256").update(content).digest("hex");
+    }
+
     const collection = await CollectionModel.create({
       userId: user.userId,
       datasetId,
@@ -326,11 +392,12 @@ export async function POST(
       mimeType: mimeType || undefined,
       rawLink: type === "link" ? rawLink : undefined,
       rawTextLength: content.length,
-      chunkSize: dataset.chunkSize,
+      hashRawText,
+      chunkSize: customChunkSize || dataset.chunkSize,
       chunkSplitter: dataset.chunkSplitter,
     });
 
-    const chunkSize = dataset.chunkSize || 512;
+    const chunkSize = customChunkSize || dataset.chunkSize || 512;
     const chunkSplitter = dataset.chunkSplitter || "";
     const embeddingModelId = String(dataset.embeddingModelId || "");
     if (!embeddingModelId) {

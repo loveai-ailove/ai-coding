@@ -7,7 +7,12 @@ import { insertVectors } from "@/lib/infra/milvus";
 import { getEmbedding } from "@/lib/ai/embedding";
 import { resolveEmbeddingRuntimeModel } from "@/lib/ai/runtime-model";
 
+const EMBEDDING_BATCH_SIZE = 50;
+const EMBEDDING_MAX_RETRIES = 3;
+
 function splitTextChunks(text: string, chunkSize: number, overlap: number, splitter?: string): string[] {
+  const safeOverlap = Math.min(overlap, Math.floor(chunkSize / 2));
+
   if (splitter && text.includes(splitter)) {
     const parts = text.split(splitter).filter((s) => s.trim());
     const chunks: string[] = [];
@@ -16,8 +21,9 @@ function splitTextChunks(text: string, chunkSize: number, overlap: number, split
       const candidate = current ? current + splitter + part : part;
       if (candidate.length > chunkSize && current) {
         chunks.push(current);
-        const overlapText = current.slice(-overlap);
-        current = overlapText + splitter + part;
+        const overlapLength = Math.min(safeOverlap, current.length);
+        const overlapText = overlapLength > 0 ? current.slice(-overlapLength) : "";
+        current = overlapText ? overlapText + splitter + part : part;
       } else {
         current = candidate;
       }
@@ -34,9 +40,53 @@ function splitTextChunks(text: string, chunkSize: number, overlap: number, split
     const end = Math.min(start + chunkSize, text.length);
     chunks.push(text.slice(start, end));
     if (end >= text.length) break;
-    start = end - overlap;
+    start = end - safeOverlap;
   }
   return chunks.filter((c) => c.trim());
+}
+
+async function getEmbeddingWithRetry(
+  model: string,
+  texts: string[],
+  runtimeConfig: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    defaultConfig?: Record<string, any> | null;
+  }
+): Promise<number[][]> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < EMBEDDING_MAX_RETRIES; attempt++) {
+    try {
+      return await getEmbedding(model, texts, runtimeConfig);
+    } catch (err) {
+      lastError = err;
+      if (attempt < EMBEDDING_MAX_RETRIES - 1) {
+        const delay = Math.pow(2, attempt) * 1000;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function embedTextsInBatches(
+  model: string,
+  texts: string[],
+  runtimeConfig: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    defaultConfig?: Record<string, any> | null;
+  }
+): Promise<number[][]> {
+  const allEmbeddings: number[][] = [];
+  for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
+    const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE);
+    const batchEmbeddings = await getEmbeddingWithRetry(model, batch, runtimeConfig);
+    allEmbeddings.push(...batchEmbeddings);
+  }
+  return allEmbeddings;
 }
 
 export async function GET(
@@ -146,6 +196,7 @@ export async function POST(
 
     const DataModel = await getDatasetDataModel();
     const createdDocs: any[] = [];
+    const createdDocIds: any[] = [];
     const vectorEntries: Array<{ id: string; datasetId: string; collectionId: string; dataId: string; vector: number[] }> = [];
 
     for (const item of dataItems) {
@@ -168,6 +219,7 @@ export async function POST(
         });
 
         createdDocs.push(doc);
+        createdDocIds.push(doc._id);
 
         vectorEntries.push({
           id: vectorId,
@@ -185,18 +237,27 @@ export async function POST(
         return doc?.q || "";
       });
 
-      const embeddings = await getEmbedding(embeddingModel.model, allTexts, {
+      const runtimeConfig = {
         baseUrl: embeddingModel.baseUrl,
         apiKey: embeddingModel.apiKey,
         model: embeddingModel.model,
         defaultConfig: embeddingModel.defaultConfig
-      });
+      };
+
+      const embeddings = await embedTextsInBatches(embeddingModel.model, allTexts, runtimeConfig);
 
       for (let i = 0; i < vectorEntries.length; i++) {
         vectorEntries[i].vector = embeddings[i];
       }
 
-      await insertVectors({ teamId: user.userId, embeddingModelId, vectors: vectorEntries });
+      try {
+        await insertVectors({ teamId: user.userId, embeddingModelId, vectors: vectorEntries });
+      } catch (err) {
+        if (createdDocIds.length > 0) {
+          await DataModel.deleteMany({ _id: { $in: createdDocIds } }).catch(() => {});
+        }
+        throw err;
+      }
     }
 
     await Dataset.updateOne(

@@ -332,7 +332,7 @@ export function NodeConfigModal({
         <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
           <div>
             <div className="text-base font-semibold text-gray-900">{modalTitle}</div>
-            <div className="mt-1 text-xs text-gray-500">按 FastGPT 的配置思路保留最常用字段，先满足基础可运行链路。</div>
+            <div className="mt-1 text-xs text-gray-500">常用配置字段</div>
           </div>
           <button
             type="button"
