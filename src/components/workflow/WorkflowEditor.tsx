@@ -23,6 +23,7 @@ export function WorkflowEditor({ appId }: { appId: string }) {
   const [edges, setEdges] = useState<any[]>([]);
   const [highlightNodeId, setHighlightNodeId] = useState<string | null>(null);
   const [selectedNodeDetail, setSelectedNodeDetail] = useState<any>(null);
+  const [expandedApiRequests, setExpandedApiRequests] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     (async () => {
@@ -229,7 +230,114 @@ export function WorkflowEditor({ appId }: { appId: string }) {
                         )}
                       </div>
                     </div>
-                    
+
+                    {/* LLM 请求参数 - 仅对 AI 节点显示 */}
+                    {snapshot.llmRequest && (
+                      <div className="mb-3">
+                        <h4 className="mb-2 text-sm font-medium text-gray-700">LLM 请求参数</h4>
+                        <pre className="max-h-[500px] overflow-y-auto rounded-lg bg-gray-900 p-4 text-xs text-green-400">
+                          {JSON.stringify(snapshot.llmRequest, null, 2)}
+                        </pre>
+                      </div>
+                    )}
+
+                    {/* API 请求详情 */}
+                    {snapshot.apiRequests && snapshot.apiRequests.length > 0 && (
+                      <div className="mb-3">
+                        <h4 className="mb-2 text-sm font-medium text-gray-700">API 请求详情</h4>
+                        <div className="space-y-3">
+                          {snapshot.apiRequests.map((req: any, idx: number) => {
+                            const reqKey = `${snapshot.nodeId}-${idx}`;
+                            const isExpanded = expandedApiRequests[reqKey];
+                            return (
+                              <div key={idx} className="rounded-lg border border-gray-200">
+                                <div 
+                                  className="flex cursor-pointer items-center justify-between border-b border-gray-100 bg-gray-50 px-3 py-2 hover:bg-gray-100"
+                                  onClick={() => setExpandedApiRequests(prev => ({ ...prev, [reqKey]: !prev[reqKey] }))}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <svg 
+                                      className={`h-4 w-4 text-gray-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`} 
+                                      fill="none" 
+                                      viewBox="0 0 24 24" 
+                                      strokeWidth={1.5} 
+                                      stroke="currentColor"
+                                    >
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                                    </svg>
+                                    <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${
+                                      req.type === 'llm' ? 'bg-blue-100 text-blue-700' :
+                                      req.type === 'embedding' ? 'bg-purple-100 text-purple-700' :
+                                      req.type === 'vector_search' ? 'bg-indigo-100 text-indigo-700' :
+                                      req.type === 'database' ? 'bg-orange-100 text-orange-700' :
+                                      req.type === 'http' ? 'bg-green-100 text-green-700' :
+                                      'bg-gray-100 text-gray-700'
+                                    }`}>
+                                      {req.type}
+                                    </span>
+                                    <span className="text-sm font-medium text-gray-800">{req.name}</span>
+                                    {req.url && !isExpanded && (
+                                      <span className="text-xs text-gray-500 truncate max-w-[200px]">{req.url}</span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    {req.duration != null && (
+                                      <span className="text-xs text-gray-500">{req.duration}s</span>
+                                    )}
+                                    <span className={`rounded-full px-1.5 py-0.5 text-xs ${
+                                      req.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                                    }`}>
+                                      {req.status}
+                                    </span>
+                                  </div>
+                                </div>
+                                {isExpanded && (
+                                  <div className="p-3">
+                                    {/* 请求信息 */}
+                                    {req.url && (
+                                      <div className="mb-2">
+                                        <span className="text-xs font-medium text-gray-500">URL:</span>
+                                        <span className="ml-2 break-all text-xs text-gray-700">{req.method} {req.url}</span>
+                                      </div>
+                                    )}
+                                    {req.headers && Object.keys(req.headers).length > 0 && (
+                                      <div className="mb-2">
+                                        <span className="text-xs font-medium text-gray-500">Headers:</span>
+                                        <pre className="mt-1 max-h-[100px] overflow-y-auto rounded bg-gray-100 p-2 text-xs text-gray-600">
+                                          {JSON.stringify(req.headers, null, 2)}
+                                        </pre>
+                                      </div>
+                                    )}
+                                    {req.body && (
+                                      <div className="mb-2">
+                                        <span className="text-xs font-medium text-gray-500">请求体:</span>
+                                        <pre className="mt-1 max-h-[200px] overflow-y-auto rounded bg-gray-100 p-2 text-xs text-gray-600">
+                                          {JSON.stringify(req.body, null, 2)}
+                                        </pre>
+                                      </div>
+                                    )}
+                                    {req.response && (
+                                      <div className="mb-2">
+                                        <span className="text-xs font-medium text-gray-500">响应:</span>
+                                        <pre className="mt-1 max-h-[200px] overflow-y-auto rounded bg-gray-100 p-2 text-xs text-gray-600">
+                                          {JSON.stringify(req.response, null, 2)}
+                                        </pre>
+                                      </div>
+                                    )}
+                                    {req.error && (
+                                      <div className="mt-2 rounded bg-red-50 p-2 text-xs text-red-600">
+                                        错误: {req.error}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
                     {/* 输出结果 */}
                     <div className="mb-3">
                       <h4 className="mb-2 text-sm font-medium text-gray-700">输出结果</h4>
@@ -248,16 +356,6 @@ export function WorkflowEditor({ appId }: { appId: string }) {
                         )}
                       </div>
                     </div>
-
-                    {/* LLM 请求参数 - 仅对 AI 节点显示 */}
-                    {snapshot.llmRequest && (
-                      <div>
-                        <h4 className="mb-2 text-sm font-medium text-gray-700">LLM 请求参数</h4>
-                        <pre className="max-h-[500px] overflow-y-auto rounded-lg bg-gray-900 p-4 text-xs text-green-400">
-                          {JSON.stringify(snapshot.llmRequest, null, 2)}
-                        </pre>
-                      </div>
-                    )}
                   </div>
                 </div>
               ))}

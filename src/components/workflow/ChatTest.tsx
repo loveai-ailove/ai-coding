@@ -1,13 +1,28 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { MarkdownMessage } from "./MarkdownMessage";
+import { readSSEStream } from "./sse";
 
 interface Message {
   obj: "Human" | "AI";
   value: string;
+  thinking?: string;
   nodeResponses?: any[];
   interactiveResponse?: any;
   executionLogs?: any[];
+}
+
+function getFinalMessageText(finalData: any, streamingAnswer: string, thinking: string) {
+  if (finalData?.outputText) return finalData.outputText;
+  if (streamingAnswer) return streamingAnswer;
+  if (finalData?.interactiveResponse) {
+    return `等待交互: ${finalData.interactiveResponse.type === "formInput" ? "表单输入" : finalData.interactiveResponse.type === "userSelect" ? "用户选择" : "继续处理"}`;
+  }
+  if (thinking) {
+    return "模型未返回最终回答，仅返回了思考内容。";
+  }
+  return "（无输出）";
 }
 
 export function ChatTestPanel({
@@ -23,11 +38,13 @@ export function ChatTestPanel({
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [chatId, setChatId] = useState<string | null>(null);
+  const [streamingThinking, setStreamingThinking] = useState("");
+  const [streamingAnswer, setStreamingAnswer] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, streamingThinking, streamingAnswer]);
 
   const handleSend = async () => {
     if (!input.trim() || loading) return;
@@ -36,6 +53,8 @@ export function ChatTestPanel({
     const newMessages = [...messages, { obj: "Human" as const, value: userMsg }];
     setMessages(newMessages);
     setLoading(true);
+    setStreamingThinking("");
+    setStreamingAnswer("");
 
     try {
       const res = await fetch(`/api/workflow/app/${appId}/debug`, {
@@ -47,33 +66,66 @@ export function ChatTestPanel({
           variables: {},
           modules: nodes,
           edges,
+          stream: true,
         }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        const interactiveText = data.interactiveResponse
-          ? `等待交互: ${data.interactiveResponse.type === "formInput" ? "表单输入" : data.interactiveResponse.type === "userSelect" ? "用户选择" : "继续处理"}`
-          : "（无输出）";
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "请求失败" }));
+        setMessages((prev) => [...prev, { obj: "AI", value: `错误: ${err.error}` }]);
+        return;
+      }
+
+      // Handle SSE stream
+      const stream = res.body;
+      if (!stream) throw new Error("No response body");
+      let finalData: any = null;
+
+      await readSSEStream(stream, (event, data) => {
+        switch (event) {
+          case "thinking":
+            setStreamingThinking((prev) => prev + (data.content || ""));
+            break;
+          case "answer":
+            setStreamingAnswer((prev) => prev + (data.content || ""));
+            break;
+          case "done":
+            finalData = data;
+            break;
+          case "error":
+            setMessages((prev) => [...prev, { obj: "AI", value: `错误: ${data.error}` }]);
+            break;
+        }
+      });
+
+      // Process final result
+      if (finalData) {
+        // Get thinking from nodeSnapshots if available
+        const chatNodeSnapshot = finalData.nodeSnapshots?.find(
+          (s: any) => s.nodeType === "chatNode" || s.nodeType === "agent"
+        );
+        const thinking = chatNodeSnapshot?.llmResponse?.thinking || streamingThinking;
+        const messageText = getFinalMessageText(finalData, streamingAnswer, thinking);
+        
         setMessages((prev) => [
           ...prev,
           {
             obj: "AI",
-            value: data.outputText || interactiveText,
-            nodeResponses: data.nodeResponses,
-            interactiveResponse: data.interactiveResponse,
-            executionLogs: data.executionLogs,
+            value: messageText,
+            thinking: thinking || undefined,
+            nodeResponses: finalData.nodeResponses,
+            interactiveResponse: finalData.interactiveResponse,
+            executionLogs: finalData.executionLogs,
           },
         ]);
-        if (data.chatId) setChatId(data.chatId);
-      } else {
-        const err = await res.json().catch(() => ({ error: "请求失败" }));
-        setMessages((prev) => [...prev, { obj: "AI", value: `错误: ${err.error}` }]);
+        if (finalData.chatId) setChatId(finalData.chatId);
       }
     } catch {
       setMessages((prev) => [...prev, { obj: "AI", value: "网络错误" }]);
     } finally {
       setLoading(false);
+      setStreamingThinking("");
+      setStreamingAnswer("");
     }
   };
 
@@ -89,7 +141,7 @@ export function ChatTestPanel({
         <button onClick={handleClear} className="text-xs text-gray-400 hover:text-gray-600">清空</button>
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
-        {messages.length === 0 && (
+        {messages.length === 0 && !loading && (
           <div className="py-8 text-center text-sm text-gray-400">发送消息测试工作流</div>
         )}
         {messages.map((msg, i) => (
@@ -99,7 +151,22 @@ export function ChatTestPanel({
                 ? "bg-blue-600 text-white"
                 : "bg-gray-100 text-gray-800"
             }`}>
-              <div className="whitespace-pre-wrap">{msg.value}</div>
+              {/* Thinking process */}
+              {msg.thinking && (
+                <details className="mb-2">
+                  <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-700">
+                    思考过程
+                  </summary>
+                  <div className="mt-1 whitespace-pre-wrap text-xs text-gray-500 italic">
+                    {msg.thinking}
+                  </div>
+                </details>
+              )}
+              {msg.obj === "Human" ? (
+                <div className="whitespace-pre-wrap">{msg.value}</div>
+              ) : (
+                <MarkdownMessage content={msg.value} />
+              )}
               {msg.nodeResponses && msg.nodeResponses.length > 0 && (
                 <div className="mt-2 border-t border-gray-200 pt-2">
                   <div className="text-xs text-gray-400 mb-1">执行节点:</div>
@@ -138,10 +205,25 @@ export function ChatTestPanel({
             </div>
           </div>
         ))}
+        {/* Streaming output */}
         {loading && (
           <div className="flex justify-start">
-            <div className="rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-500">
-              <span className="inline-block animate-pulse">思考中...</span>
+            <div className="max-w-[85%] rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-800">
+              {streamingThinking && (
+                <details className="mb-2" open>
+                  <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-700">
+                    思考中...
+                  </summary>
+                  <div className="mt-1 whitespace-pre-wrap text-xs text-gray-500 italic">
+                    {streamingThinking}
+                  </div>
+                </details>
+              )}
+              {streamingAnswer ? (
+                <MarkdownMessage content={streamingAnswer} />
+              ) : !streamingThinking ? (
+                <span className="inline-block animate-pulse">思考中...</span>
+              ) : null}
             </div>
           </div>
         )}

@@ -60,6 +60,20 @@ export const workflowNodeSchemaMap: Record<string, WorkflowNodeSchema> = {
         defaultValue: "",
       }),
       createInput({
+        key: "modelName",
+        label: "模型名称",
+        type: FlowNodeInputTypeEnum.hidden,
+        valueType: WorkflowIOValueTypeEnum.string,
+        defaultValue: "",
+      }),
+      createInput({
+        key: "modelCode",
+        label: "模型编码",
+        type: FlowNodeInputTypeEnum.hidden,
+        valueType: WorkflowIOValueTypeEnum.string,
+        defaultValue: "",
+      }),
+      createInput({
         key: NodeInputKeyEnum.aiSystemPrompt,
         label: "System Prompt",
         type: FlowNodeInputTypeEnum.textarea,
@@ -85,7 +99,7 @@ export const workflowNodeSchemaMap: Record<string, WorkflowNodeSchema> = {
         label: "最大 Token",
         type: FlowNodeInputTypeEnum.numberInput,
         valueType: WorkflowIOValueTypeEnum.number,
-        defaultValue: 2000,
+        defaultValue: 32000,
       }),
       createInput({
         key: NodeInputKeyEnum.userChatInput,
@@ -94,7 +108,7 @@ export const workflowNodeSchemaMap: Record<string, WorkflowNodeSchema> = {
         valueType: WorkflowIOValueTypeEnum.string,
         defaultValue: [GLOBAL_VARIABLE_NODE_ID, NodeInputKeyEnum.userChatInput],
         connected: true,
-        showTargetInApp: true,
+        showTargetInApp: false,
       }),
       createInput({
         key: NodeOutputKeyEnum.datasetQuoteQA,
@@ -405,15 +419,59 @@ function mergeOutputs(schemaOutputs: WorkflowOutputItem[], currentOutputs: Workf
   return merged;
 }
 
+function shouldResetUserChatInput(module: WorkflowNodeItemType, input: WorkflowInputItem) {
+  if (input.key !== NodeInputKeyEnum.userChatInput) return false;
+
+  const supportedNodeTypes = [
+    FlowNodeTypeEnum.chatNode,
+    FlowNodeTypeEnum.datasetSearchNode,
+  ];
+
+  if (!supportedNodeTypes.includes(module.flowNodeType)) return false;
+
+  const value = input.value;
+  if (value === undefined || value === null) return true;
+  if (Array.isArray(value)) {
+    return value.length === 0 || !(value.length === 2 && value.every((item) => typeof item === "string"));
+  }
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return true;
+    if (text.startsWith("{") || text.startsWith("[")) {
+      return true;
+    }
+    return false;
+  }
+
+  if (typeof value === "object") return true;
+
+  return false;
+}
+
 export function normalizeWorkflowNode(module: WorkflowNodeItemType): WorkflowNodeItemType {
   const schema = getWorkflowNodeSchema(module.flowNodeType);
   if (!schema) return clone(module);
+
+  const mergedInputs = mergeInputs(schema.inputs, module.inputs).map((input) => {
+    if (!shouldResetUserChatInput(module, input)) {
+      return input;
+    }
+
+    const schemaInput = schema.inputs.find((item) => item.key === input.key);
+    const fallbackValue = clone(schemaInput?.defaultValue);
+
+    return {
+      ...input,
+      value: fallbackValue,
+      defaultValue: fallbackValue,
+    };
+  });
 
   return {
     ...clone(module),
     name: module.name || schema.label,
     intro: module.intro || schema.intro,
-    inputs: mergeInputs(schema.inputs, module.inputs),
+    inputs: mergedInputs,
     outputs: mergeOutputs(schema.outputs, module.outputs),
   };
 }

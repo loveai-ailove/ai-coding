@@ -165,6 +165,11 @@ enum LoginStatus {
   FAIL
 }
 
+enum AiModelType {
+  LLM
+  EMBEDDING
+}
+
 model SysOperLog {
   id            Int       @id @default(autoincrement())
   userId        Int?      @map("user_id")
@@ -206,4 +211,34 @@ model SysLoginLog {
   @@index([loginTime])
   @@index([username])
   @@map("sys_login_log")
+}
+
+model AiModel {
+  id                  Int         @id @default(autoincrement())
+  type                AiModelType
+  name                String
+  code                String      @unique
+  provider            String
+  protocol            String      @default("openai-compatible")
+  model               String
+  baseUrl             String      @map("base_url")
+  apiKey              String      @map("api_key") @db.Text
+  isActive            Boolean     @default(true) @map("is_active")
+  isDefault           Boolean     @default(false) @map("is_default")
+  sort                Int         @default(0)
+  maxContext          Int?        @map("max_context")
+  maxResponse         Int?        @map("max_response")
+  quoteMaxToken       Int?        @map("quote_max_token")
+  maxTemperature      Float?      @map("max_temperature")
+  defaultSystemPrompt String?     @map("default_system_prompt") @db.Text
+  embeddingDimension  Int?        @map("embedding_dimension")
+  embeddingMaxToken   Int?        @map("embedding_max_token")
+  defaultConfig       Json?       @map("default_config")
+  remark              String?     @db.Text
+  createdAt           DateTime    @default(now()) @map("created_at")
+  updatedAt           DateTime    @updatedAt @map("updated_at")
+
+  @@index([type, isActive, sort])
+  @@index([type, isDefault])
+  @@map("ai_model")
 }

@@ -1,8 +1,9 @@
-import { chatCompletion, type ChatMessage } from "@/lib/ai/llm";
+import { chatCompletion, chatCompletionStream, extractAnswerContent, parseStreamChunk, sanitizeFinalAnswer, type ChatMessage } from "@/lib/ai/llm";
 import { getSingleEmbedding } from "@/lib/ai/embedding";
 import { searchVectors } from "@/lib/infra/milvus";
-import { getDatasetDataModel } from "@/lib/models/dataset";
+import { getDatasetDataModel, getDatasetModel, getDatasetCollectionModel } from "@/lib/models/dataset";
 import { connectMongo } from "@/lib/infra/mongo";
+import { resolveEmbeddingRuntimeModel, resolveLlmRuntimeModel } from "@/lib/ai/runtime-model";
 import {
   FlowNodeTypeEnum,
   NodeInputKeyEnum,
@@ -103,13 +104,85 @@ function getHistories(historyCount: any, ctx: DispatchContext): Array<{ obj: "Hu
   return ctx.histories.slice(-Math.min(messageCount, ctx.histories.length));
 }
 
+function normalizeTextInput(value: unknown, fallback = ""): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+
+  if (Array.isArray(value)) {
+    const textList = value
+      .map((item) => normalizeTextInput(item, ""))
+      .map((item) => item.trim())
+      .filter(Boolean);
+    return textList.length > 0 ? textList.join("\n") : fallback;
+  }
+
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const candidateKeys = ["text", "content", "value", "query", "question", "answerText"];
+
+    for (const key of candidateKeys) {
+      const candidate = record[key];
+      const normalized = normalizeTextInput(candidate, "");
+      if (normalized.trim()) {
+        return normalized;
+      }
+    }
+
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return fallback;
+    }
+  }
+
+  return fallback;
+}
+
+function isDatasetQuoteLike(value: unknown): boolean {
+  if (!value) return false;
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return false;
+    return value.every((item) => isDatasetQuoteLike(item));
+  }
+
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return typeof record.q === "string" || typeof record.datasetId === "string" || typeof record.collectionId === "string";
+  }
+
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!(text.startsWith("{") || text.startsWith("["))) return false;
+    try {
+      const parsed = JSON.parse(text);
+      return isDatasetQuoteLike(parsed);
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+function resolveUserInput(paramValue: unknown, ctxUserInput: unknown): string {
+  if (isDatasetQuoteLike(paramValue)) {
+    return normalizeTextInput(ctxUserInput, "").trim();
+  }
+
+  const paramText = normalizeTextInput(paramValue, "").trim();
+  if (paramText) return paramText;
+
+  return normalizeTextInput(ctxUserInput, "").trim();
+}
+
 // ═══════════════════════════════════════════════
 // System / No-op nodes
 // ═══════════════════════════════════════════════
 
 async function dispatchWorkflowStart(props: ModuleDispatchProps): Promise<NodeDispatchResult> {
   const { ctx } = props;
-  const userChatInput = ctx.userChatInput || ctx.query || "";
+  const userChatInput = normalizeTextInput(ctx.userChatInput || ctx.query || "", "");
   return {
     data: {
       [NodeOutputKeyEnum.answerText]: userChatInput,
@@ -153,11 +226,15 @@ async function dispatchChatNode(props: ModuleDispatchProps): Promise<NodeDispatc
   const nodesMap = ctx.runtimeNodesMap;
   const params = getNodeRunParams(ctx, node, ctx.variables, nodesMap);
 
-  const model = params[NodeInputKeyEnum.aiModel] || process.env.DEFAULT_LLM_MODEL || "gpt-3.5-turbo";
-  const systemPrompt = params[NodeInputKeyEnum.aiSystemPrompt] || "";
+  const llmModel = await resolveLlmRuntimeModel(params[NodeInputKeyEnum.aiModel]);
+  const model = llmModel.model;
+  const systemPrompt = params[NodeInputKeyEnum.aiSystemPrompt] || llmModel.defaultSystemPrompt || "";
   const temperature = params[NodeInputKeyEnum.aiTemperature] ?? 0.7;
-  const maxToken = params[NodeInputKeyEnum.aiMaxToken] ?? 2000;
-  const userChatInput = params[NodeInputKeyEnum.userChatInput] || ctx.userChatInput || "";
+  const maxToken = params[NodeInputKeyEnum.aiMaxToken] ?? 32000;
+  const userChatInput = resolveUserInput(
+    params[NodeInputKeyEnum.userChatInput],
+    ctx.userChatInput
+  );
   const history = params[NodeInputKeyEnum.history];
   const isResponseAnswerText = params[NodeInputKeyEnum.isResponseAnswerText] !== false;
   // Priority: connected edge value > global variables > empty
@@ -176,11 +253,30 @@ async function dispatchChatNode(props: ModuleDispatchProps): Promise<NodeDispatc
     } catch {}
   }
 
-  const messages: ChatMessage[] = [];
+  const quoteText =
+    quoteQA && Array.isArray(quoteQA) && quoteQA.length > 0
+      ? quoteQA
+          .map((q: any, i: number) => `[${i + 1}] ${q.q}${q.a ? ` - ${q.a}` : ""}`)
+          .join("\n")
+      : "";
 
-  if (systemPrompt) {
-    messages.push({ role: "system", content: systemPrompt });
-  }
+  const knowledgeGuideText = quoteText
+    ? ["知识库参考资料：", quoteText]
+        .filter(Boolean)
+        .join("\n\n")
+    : "";
+
+  const systemContent = [systemPrompt, knowledgeGuideText]
+    .map((item) => normalizeTextInput(item, "").trim())
+    .filter(Boolean)
+    .join("\n\n");
+
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content: systemContent || "你是一个有帮助的 AI 助手。",
+    },
+  ];
 
   const chatHistories = getHistories(history, ctx);
   for (const h of chatHistories) {
@@ -190,17 +286,7 @@ async function dispatchChatNode(props: ModuleDispatchProps): Promise<NodeDispatc
     });
   }
 
-  if (quoteQA && Array.isArray(quoteQA) && quoteQA.length > 0) {
-    const quoteText = quoteQA
-      .map((q: any, i: number) => `[${i + 1}] ${q.q}${q.a ? ` - ${q.a}` : ""}`)
-      .join("\n");
-    messages.push({
-      role: "user",
-      content: `根据以下知识库内容回答问题:\n${quoteText}\n\n用户问题: ${userChatInput}`,
-    });
-  } else {
-    messages.push({ role: "user", content: userChatInput });
-  }
+  messages.push({ role: "user", content: userChatInput });
 
   const llmRequestParams = {
     model,
@@ -210,23 +296,131 @@ async function dispatchChatNode(props: ModuleDispatchProps): Promise<NodeDispatc
     stream: false,
   };
 
-  const result = await chatCompletion(llmRequestParams);
+  const llmStartTime = Date.now();
+  
+  // Check if we have a stream callback for real-time updates
+  const streamCallback = ctx.streamCallback;
+  let actualLlmRequest = llmRequestParams;
+  
+  let fullContent = "";
+  let thinkingContent = "";
+  let answerContent = "";
+  let totalTokens = 0;
+  
+  if (streamCallback) {
+    // Use streaming for real-time updates
+    const streamReqParams = { ...llmRequestParams, stream: true };
+    actualLlmRequest = streamReqParams;
+    const stream = await chatCompletionStream(streamReqParams, {
+      baseUrl: llmModel.baseUrl,
+      apiKey: llmModel.apiKey,
+      model: llmModel.model,
+      defaultConfig: llmModel.defaultConfig
+    });
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let streamedRawContent = "";
+    let sawReasoningChunk = false;
+    let sawAnswerChunk = false;
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      
+      for (const line of lines) {
+        if (!line.trim() || line.startsWith("data: [DONE]")) continue;
+        const chunk = parseStreamChunk(line);
+        if (!chunk) continue;
+        
+        if (chunk.reasoning_content) {
+          sawReasoningChunk = true;
+          streamedRawContent += chunk.reasoning_content;
+          thinkingContent += chunk.reasoning_content;
+          streamCallback("thinking", { content: chunk.reasoning_content });
+        }
+        
+        if (chunk.content) {
+          sawAnswerChunk = true;
+          streamedRawContent += chunk.content;
+          answerContent += chunk.content;
+          streamCallback("answer", { content: chunk.content });
+        }
+        
+        if (chunk.finish_reason === "stop") {
+          break;
+        }
+      }
+    }
 
-  const content = result.choices[0]?.message?.content || "";
+    fullContent = streamedRawContent.trim();
+
+    const canParseMixedContent = sawAnswerChunk || /<think>[\s\S]*?<\/think>/i.test(fullContent);
+    if (canParseMixedContent) {
+      const extracted = extractAnswerContent(
+        fullContent || (thinkingContent ? `<think>${thinkingContent}</think>${answerContent}` : answerContent)
+      );
+
+      if (extracted.thinking) {
+        thinkingContent = extracted.thinking;
+      }
+      answerContent = sanitizeFinalAnswer(extracted.answer, thinkingContent);
+    } else if (!sawReasoningChunk && fullContent) {
+      answerContent = sanitizeFinalAnswer(fullContent, thinkingContent);
+    }
+  } else {
+    // Non-streaming fallback
+    const result = await chatCompletion(llmRequestParams, {
+      baseUrl: llmModel.baseUrl,
+      apiKey: llmModel.apiKey,
+      model: llmModel.model,
+      defaultConfig: llmModel.defaultConfig
+    });
+    fullContent = result.choices[0]?.message?.content || "";
+    totalTokens = result.usage?.total_tokens || 0;
+    
+    const extracted = extractAnswerContent(fullContent);
+    thinkingContent = extracted.thinking;
+    answerContent = sanitizeFinalAnswer(extracted.answer, thinkingContent);
+  }
+  
+  const llmDuration = +((Date.now() - llmStartTime) / 1000).toFixed(2);
+
+  const llmApiUrl = llmModel.baseUrl.replace(/\/$/, "") + "/chat/completions";
 
   return {
     data: {
-      [NodeOutputKeyEnum.answerText]: isResponseAnswerText ? content : "",
+      [NodeOutputKeyEnum.answerText]: isResponseAnswerText ? answerContent : "",
     },
-    answerText: isResponseAnswerText ? content : "",
+    answerText: isResponseAnswerText ? answerContent : "",
+    reasoningText: thinkingContent || undefined,
     nodeResponse: {
       nodeId: node.nodeId,
       moduleName: node.name,
       moduleType: node.flowNodeType,
       model,
-      tokens: result.usage?.total_tokens || 0,
+      tokens: totalTokens,
       query: userChatInput,
-      llmRequest: llmRequestParams,
+      llmRequest: actualLlmRequest,
+      llmResponse: {
+        thinking: thinkingContent,
+        answer: answerContent,
+        rawContent: fullContent,
+      },
+      apiRequests: [
+        {
+          type: "llm",
+          name: "Chat Completion API",
+          url: llmApiUrl,
+          method: "POST",
+          duration: llmDuration,
+          status: "success",
+        },
+      ],
     },
   };
 }
@@ -243,7 +437,10 @@ async function dispatchDatasetSearch(props: ModuleDispatchProps): Promise<NodeDi
   const datasets = params[NodeInputKeyEnum.datasetSelectList] || [];
   const similarity = params[NodeInputKeyEnum.datasetSimilarity] ?? 0.4;
   const limit = params[NodeInputKeyEnum.datasetMaxTokens] ?? 5000;
-  const userQuery = params[NodeInputKeyEnum.userChatInput] || ctx.userChatInput || "";
+  const userQuery = resolveUserInput(
+    params[NodeInputKeyEnum.userChatInput],
+    ctx.userChatInput
+  );
 
   if (datasets.length === 0) {
     return {
@@ -258,25 +455,130 @@ async function dispatchDatasetSearch(props: ModuleDispatchProps): Promise<NodeDi
     };
   }
 
-  const embeddingModel = datasets[0]?.vectorModel || process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-ada-002";
-  const vector = await getSingleEmbedding(embeddingModel, userQuery);
+  const embeddingModelId = String(datasets[0]?.embeddingModelId || "");
+  if (!embeddingModelId) {
+    throw new Error("知识库未绑定嵌入模型");
+  }
+  const hasMixedEmbeddingModel = datasets.some(
+    (item: any) => String(item?.embeddingModelId || "") !== embeddingModelId
+  );
+  if (hasMixedEmbeddingModel) {
+    throw new Error("同一个知识库检索节点暂不支持混用不同嵌入模型的知识库");
+  }
+  const embeddingModel = await resolveEmbeddingRuntimeModel(embeddingModelId);
+  
+  const apiRequests: Array<any> = [];
+  
+  // Embedding API call
+  const embeddingStartTime = Date.now();
+  let vector: number[];
+  try {
+    vector = await getSingleEmbedding(embeddingModel.model, userQuery, {
+      baseUrl: embeddingModel.baseUrl,
+      apiKey: embeddingModel.apiKey,
+      model: embeddingModel.model,
+      defaultConfig: embeddingModel.defaultConfig
+    });
+    const embeddingDuration = +((Date.now() - embeddingStartTime) / 1000).toFixed(2);
+    const embeddingUrl = embeddingModel.baseUrl.replace(/\/$/, "") + "/embeddings";
+    apiRequests.push({
+      type: "embedding",
+      name: "Embedding API",
+      url: embeddingUrl,
+      method: "POST",
+      body: { model: embeddingModel.model, input: userQuery },
+      response: {
+        vector: `[${vector.slice(0, 5).join(",")}...] (dim=${vector.length})`,
+        dimension: vector.length,
+      },
+      duration: embeddingDuration,
+      status: "success",
+    });
+  } catch (err) {
+    apiRequests.push({
+      type: "embedding",
+      name: "Embedding API",
+      url: embeddingModel.baseUrl.replace(/\/$/, "") + "/embeddings",
+      method: "POST",
+      body: { model: embeddingModel.model, input: userQuery },
+      status: "error",
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+  
   const datasetIds = datasets
     .map((d: any) => (typeof d === "string" ? d : d?.datasetId || d?.id || d?._id))
     .filter(Boolean);
 
+  // Vector search API call
+  const vectorSearchStartTime = Date.now();
   const searchResults = await searchVectors({
     teamId: ctx.userId,
+    embeddingModelId,
     vector,
     topK: 20,
     datasetIds,
+  });
+  const vectorSearchDuration = +((Date.now() - vectorSearchStartTime) / 1000).toFixed(2);
+  
+  apiRequests.push({
+    type: "vector_search",
+    name: "Milvus Vector Search",
+    url: process.env.MILVUS_ADDRESS || "",
+    method: "SDK",
+    body: {
+      collection: `kb_${ctx.userId.replace(/-/g, "").slice(0, 20)}`,
+      vector: `[${vector.slice(0, 5).join(",")}...] (dim=${vector.length})`,
+      topK: 20,
+      datasetIds,
+    },
+    response: {
+      total: searchResults.length,
+      results: searchResults.slice(0, 10).map((r: any) => ({
+        dataId: r.dataId,
+        score: r.score,
+        datasetId: r.datasetId,
+        collectionId: r.collectionId,
+      })),
+    },
+    duration: vectorSearchDuration,
+    status: "success",
   });
 
   const filteredResults = searchResults.filter((r: any) => r.score >= similarity);
 
   await connectMongo();
   const DatasetData = await getDatasetDataModel();
+  const Dataset = await getDatasetModel();
+  const DatasetCollection = await getDatasetCollectionModel();
+  
   const dataIds = filteredResults.map((r: any) => r.dataId);
   const dataRecords = await DatasetData.find({ _id: { $in: dataIds } }).lean();
+  
+  // Query dataset and collection names
+  const uniqueDatasetIds = [...new Set(filteredResults.map((r: any) => r.datasetId))];
+  const uniqueCollectionIds = [...new Set(filteredResults.map((r: any) => r.collectionId))];
+  
+  const datasetRecords = await Dataset.find({ _id: { $in: uniqueDatasetIds } }).lean();
+  const collectionRecords = await DatasetCollection.find({ _id: { $in: uniqueCollectionIds } }).lean();
+  
+  const datasetNameMap = new Map(datasetRecords.map((d: any) => [String(d._id), d.name]));
+  const collectionNameMap = new Map(collectionRecords.map((c: any) => [String(c._id), c.name]));
+
+  // Update Milvus search response with detailed results
+  apiRequests[apiRequests.length - 1].response = {
+    total: searchResults.length,
+    filtered: filteredResults.length,
+    results: filteredResults.slice(0, 10).map((r: any) => ({
+      dataId: r.dataId,
+      score: r.score,
+      datasetId: r.datasetId,
+      datasetName: datasetNameMap.get(r.datasetId) || "Unknown",
+      collectionId: r.collectionId,
+      collectionName: collectionNameMap.get(r.collectionId) || "Unknown",
+    })),
+  };
 
   const quoteQA = filteredResults
     .map((r: any) => {
@@ -294,6 +596,33 @@ async function dispatchDatasetSearch(props: ModuleDispatchProps): Promise<NodeDi
     .filter(Boolean)
     .slice(0, Math.max(1, Math.floor(limit / 500)));
 
+  // Database query API call
+  const dbStartTime = Date.now();
+  const dbDuration = +((Date.now() - dbStartTime) / 1000).toFixed(2);
+  apiRequests.push({
+    type: "database",
+    name: "MongoDB Query",
+    url: process.env.MONGODB_URI || "MongoDB",
+    method: "find",
+    body: {
+      collection: "dataset_datas",
+      filter: { _id: { $in: dataIds } },
+    },
+    response: {
+      total: dataRecords.length,
+      documents: dataRecords.slice(0, 10).map((d: any) => ({
+        id: String(d._id),
+        q: d.q?.slice(0, 100) + (d.q?.length > 100 ? "..." : ""),
+        a: d.a?.slice(0, 100) + (d.a?.length > 100 ? "..." : ""),
+        datasetId: String(d.datasetId),
+        collectionId: String(d.collectionId),
+        chunkIndex: d.chunkIndex,
+      })),
+    },
+    duration: dbDuration,
+    status: "success",
+  });
+
   return {
     data: { [NodeOutputKeyEnum.datasetQuoteQA]: quoteQA },
     nodeResponse: {
@@ -302,6 +631,7 @@ async function dispatchDatasetSearch(props: ModuleDispatchProps): Promise<NodeDi
       moduleType: node.flowNodeType,
       query: userQuery,
       total: quoteQA.length,
+      apiRequests,
     },
   };
 }
@@ -386,9 +716,13 @@ async function dispatchClassifyQuestion(props: ModuleDispatchProps): Promise<Nod
   const nodesMap = ctx.runtimeNodesMap;
   const params = getNodeRunParams(ctx, node, ctx.variables, nodesMap);
 
-  const model = params[NodeInputKeyEnum.aiModel] || process.env.DEFAULT_LLM_MODEL || "gpt-3.5-turbo";
-  const systemPrompt = params[NodeInputKeyEnum.aiSystemPrompt] || "";
-  const userChatInput = params[NodeInputKeyEnum.userChatInput] || ctx.userChatInput || "";
+  const llmModel = await resolveLlmRuntimeModel(params[NodeInputKeyEnum.aiModel]);
+  const model = llmModel.model;
+  const systemPrompt = params[NodeInputKeyEnum.aiSystemPrompt] || llmModel.defaultSystemPrompt || "";
+  const userChatInput = resolveUserInput(
+    params[NodeInputKeyEnum.userChatInput],
+    ctx.userChatInput
+  );
   const agents = params[NodeInputKeyEnum.agents] || [];
   const history = params[NodeInputKeyEnum.history];
 
@@ -422,12 +756,20 @@ async function dispatchClassifyQuestion(props: ModuleDispatchProps): Promise<Nod
     { role: "user", content: userChatInput },
   ];
 
-  const result = await chatCompletion({
-    model,
-    messages,
-    temperature: 0.01,
-    max_tokens: 100,
-  });
+  const result = await chatCompletion(
+    {
+      model,
+      messages,
+      temperature: 0.01,
+      max_tokens: 100,
+    },
+    {
+      baseUrl: llmModel.baseUrl,
+      apiKey: llmModel.apiKey,
+      model: llmModel.model,
+      defaultConfig: llmModel.defaultConfig
+    }
+  );
 
   const answer = (result.choices[0]?.message?.content || "").trim();
   const matched = agents.find((item: any) => answer.includes(item.key)) || agents[agents.length - 1];
@@ -461,8 +803,12 @@ async function dispatchContentExtract(props: ModuleDispatchProps): Promise<NodeD
   const nodesMap = ctx.runtimeNodesMap;
   const params = getNodeRunParams(ctx, node, ctx.variables, nodesMap);
 
-  const model = params[NodeInputKeyEnum.aiModel] || process.env.DEFAULT_LLM_MODEL || "gpt-3.5-turbo";
-  const content = params[NodeInputKeyEnum.userChatInput] || ctx.userChatInput || "";
+  const llmModel = await resolveLlmRuntimeModel(params[NodeInputKeyEnum.aiModel]);
+  const model = llmModel.model;
+  const content = resolveUserInput(
+    params[NodeInputKeyEnum.userChatInput],
+    ctx.userChatInput
+  );
   const extractKeys = params[NodeInputKeyEnum.extractFields] || [];
   const description = params["description" as string] || "";
   const history = params[NodeInputKeyEnum.history];
@@ -501,12 +847,20 @@ Return ONLY a valid JSON object, no markdown code blocks or explanation.`;
     { role: "user", content },
   ];
 
-  const result = await chatCompletion({
-    model,
-    messages,
-    temperature: 0.01,
-    max_tokens: 2000,
-  });
+  const result = await chatCompletion(
+    {
+      model,
+      messages,
+      temperature: 0.01,
+      max_tokens: 2000,
+    },
+    {
+      baseUrl: llmModel.baseUrl,
+      apiKey: llmModel.apiKey,
+      model: llmModel.model,
+      defaultConfig: llmModel.defaultConfig
+    }
+  );
 
   const rawText = result.choices[0]?.message?.content || "";
   let extracted: Record<string, any> = {};
@@ -637,7 +991,10 @@ async function dispatchHttpRequest(props: ModuleDispatchProps): Promise<NodeDisp
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout * 1000);
 
+  const apiRequests: Array<any> = [];
+
   try {
+    const httpStartTime = Date.now();
     const res = await fetch(url, {
       method,
       headers,
@@ -647,9 +1004,27 @@ async function dispatchHttpRequest(props: ModuleDispatchProps): Promise<NodeDisp
       signal: controller.signal,
     });
     clearTimeout(timer);
+    const httpDuration = +((Date.now() - httpStartTime) / 1000).toFixed(2);
     const text = await res.text();
     let json: any;
     try { json = JSON.parse(text); } catch { json = text; }
+
+    apiRequests.push({
+      type: "http",
+      name: `HTTP ${method}`,
+      url,
+      method,
+      headers,
+      body: body ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
+      response: {
+        statusCode: res.status,
+        contentType: res.headers.get("content-type"),
+        bodyPreview: typeof json === "string" ? json.slice(0, 500) : json,
+      },
+      duration: httpDuration,
+      status: res.ok ? "success" : "error",
+      error: res.ok ? undefined : `HTTP ${res.status}`,
+    });
 
     return {
       data: { [NodeOutputKeyEnum.httpResult]: json },
@@ -660,10 +1035,21 @@ async function dispatchHttpRequest(props: ModuleDispatchProps): Promise<NodeDisp
         statusCode: res.status,
         url,
         method,
+        apiRequests,
       },
     };
   } catch (err) {
     clearTimeout(timer);
+    apiRequests.push({
+      type: "http",
+      name: `HTTP ${method}`,
+      url,
+      method,
+      headers,
+      body: body ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
+      status: "error",
+      error: err instanceof Error ? err.message : String(err),
+    });
     return {
       data: {},
       error: { [NodeOutputKeyEnum.errorText]: `HTTP request failed: ${err instanceof Error ? err.message : String(err)}` },
@@ -672,6 +1058,7 @@ async function dispatchHttpRequest(props: ModuleDispatchProps): Promise<NodeDisp
         moduleName: node.name,
         moduleType: node.flowNodeType,
         error: `HTTP request failed: ${err instanceof Error ? err.message : String(err)}`,
+        apiRequests,
       },
     };
   }
@@ -711,6 +1098,18 @@ async function dispatchCode(props: ModuleDispatchProps): Promise<NodeDispatchRes
     }),
   });
 
+  const apiRequests: Array<any> = [{
+    type: "sandbox",
+    name: "Code Sandbox API",
+    url: `${sandboxUrl}/sandbox/js`,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: { code, variables: ctx.variables },
+    response: { statusCode: res.status },
+    status: res.ok ? "success" : "error",
+    error: res.ok ? undefined : `HTTP ${res.status}`,
+  }];
+
   if (!res.ok) {
     return {
       data: {},
@@ -720,6 +1119,7 @@ async function dispatchCode(props: ModuleDispatchProps): Promise<NodeDispatchRes
         moduleName: node.name,
         moduleType: node.flowNodeType,
         error: `Code execution failed: ${res.status}`,
+        apiRequests,
       },
     };
   }
@@ -731,6 +1131,7 @@ async function dispatchCode(props: ModuleDispatchProps): Promise<NodeDispatchRes
       nodeId: node.nodeId,
       moduleName: node.name,
       moduleType: node.flowNodeType,
+      apiRequests,
     },
   };
 }
@@ -862,9 +1263,13 @@ async function dispatchAgent(props: ModuleDispatchProps): Promise<NodeDispatchRe
   const nodesMap = ctx.runtimeNodesMap;
   const params = getNodeRunParams(ctx, node, ctx.variables, nodesMap);
 
-  const model = params[NodeInputKeyEnum.aiModel] || process.env.DEFAULT_LLM_MODEL || "gpt-3.5-turbo";
-  const systemPrompt = params[NodeInputKeyEnum.aiSystemPrompt] || "";
-  const userChatInput = params[NodeInputKeyEnum.userChatInput] || ctx.userChatInput || "";
+  const llmModel = await resolveLlmRuntimeModel(params[NodeInputKeyEnum.aiModel]);
+  const model = llmModel.model;
+  const systemPrompt = params[NodeInputKeyEnum.aiSystemPrompt] || llmModel.defaultSystemPrompt || "";
+  const userChatInput = resolveUserInput(
+    params[NodeInputKeyEnum.userChatInput],
+    ctx.userChatInput
+  );
   const history = params[NodeInputKeyEnum.history];
 
   const chatHistories = getHistories(history, ctx);
@@ -877,12 +1282,20 @@ async function dispatchAgent(props: ModuleDispatchProps): Promise<NodeDispatchRe
     { role: "user", content: userChatInput },
   ];
 
-  const result = await chatCompletion({
-    model,
-    messages,
-    temperature: 0.7,
-    max_tokens: 4000,
-  });
+  const result = await chatCompletion(
+    {
+      model,
+      messages,
+      temperature: 0.7,
+      max_tokens: 4000,
+    },
+    {
+      baseUrl: llmModel.baseUrl,
+      apiKey: llmModel.apiKey,
+      model: llmModel.model,
+      defaultConfig: llmModel.defaultConfig
+    }
+  );
 
   const content = result.choices[0]?.message?.content || "";
 

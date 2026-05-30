@@ -5,6 +5,9 @@ import { requireKnowledgePermission } from "@/lib/auth/fastgpt-auth";
 import { getDatasetModel, getDatasetCollectionModel, getDatasetDataModel } from "@/lib/models/dataset";
 import { insertVectors } from "@/lib/infra/milvus";
 import { getEmbedding } from "@/lib/ai/embedding";
+import { resolveEmbeddingRuntimeModel } from "@/lib/ai/runtime-model";
+import { assertSupportedKnowledgeFile, parseKnowledgeFile } from "@/lib/knowledge/file-parser";
+import { ensureBuckets, getPrivateUrl, minioClient, STORAGE_PRIVATE_BUCKET } from "@/lib/infra/storage";
 
 function htmlToText(html: string) {
   return html
@@ -55,10 +58,10 @@ async function processTextToVectors(params: {
   userId: string;
   datasetId: string;
   collectionId: string;
+  embeddingModelId: string;
   rawText: string;
   chunkSize: number;
   chunkSplitter: string;
-  vectorModel: string;
 }) {
   const overlap = Math.floor(params.chunkSize * 0.2);
   const chunks = splitTextChunks(params.rawText, params.chunkSize, overlap, params.chunkSplitter);
@@ -70,8 +73,13 @@ async function processTextToVectors(params: {
   const DatasetData = await getDatasetDataModel();
   const dataDocs: Array<{ _id: any; q: string; indexes: Array<{ dataId: string; text: string }> }> = [];
   const vectorEntries: Array<{ id: string; datasetId: string; collectionId: string; dataId: string; vector: number[] }> = [];
-
-  const embeddings = await getEmbedding(params.vectorModel, chunks);
+  const embeddingModel = await resolveEmbeddingRuntimeModel(params.embeddingModelId);
+  const embeddings = await getEmbedding(embeddingModel.model, chunks, {
+    baseUrl: embeddingModel.baseUrl,
+    apiKey: embeddingModel.apiKey,
+    model: embeddingModel.model,
+    defaultConfig: embeddingModel.defaultConfig
+  });
 
   for (let i = 0; i < chunks.length; i++) {
     const dataId = nanoid();
@@ -98,7 +106,11 @@ async function processTextToVectors(params: {
   }
 
   if (vectorEntries.length > 0) {
-    await insertVectors({ teamId: params.userId, vectors: vectorEntries });
+    await insertVectors({
+      teamId: params.userId,
+      embeddingModelId: params.embeddingModelId,
+      vectors: vectorEntries
+    });
   }
 
   return { dataCount: chunks.length, chunks };
@@ -172,6 +184,8 @@ export async function GET(
         name: item.name,
         type: item.type,
         tags: item.tags,
+        fileExt: item.fileExt,
+        fileSize: item.fileSize,
         rawLink: item.rawLink,
         rawTextLength: item.rawTextLength,
         createTime: item.createTime,
@@ -205,11 +219,33 @@ export async function POST(
       throw new Error("NOT_FOUND");
     }
 
-    const body = await request.json();
-    const { name, type, rawText, rawLink, tags } = body;
+    const contentType = request.headers.get("content-type") || "";
+    let name = "";
+    let type = "";
+    let rawText = "";
+    let rawLink = "";
+    let tags: string[] = [];
+    let uploadFile: File | null = null;
 
-    if (!name || !name.trim()) {
-      throw new Error("集合名称不能为空");
+    if (contentType.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      name = String(formData.get("name") || "");
+      type = String(formData.get("type") || "file");
+      rawText = String(formData.get("rawText") || "");
+      rawLink = String(formData.get("rawLink") || "");
+      const rawTags = String(formData.get("tags") || "");
+      tags = rawTags ? rawTags.split(",").map((item) => item.trim()).filter(Boolean) : [];
+      const file = formData.get("file");
+      if (file instanceof File) {
+        uploadFile = file;
+      }
+    } else {
+      const body = await request.json();
+      name = String(body.name || "");
+      type = String(body.type || "");
+      rawText = String(body.rawText || "");
+      rawLink = String(body.rawLink || "");
+      tags = Array.isArray(body.tags) ? body.tags : [];
     }
 
     if (!type || !["text", "link", "file"].includes(type)) {
@@ -218,9 +254,18 @@ export async function POST(
 
     const CollectionModel = await getDatasetCollectionModel();
 
+    let collectionName = name || "";
     let content = rawText || "";
+    let fileKey = "";
+    let fileUrl = "";
+    let fileExt = "";
+    let fileSize = 0;
+    let mimeType = "";
 
     if (type === "link") {
+      if (!collectionName.trim()) {
+        collectionName = rawLink || "网页链接";
+      }
       if (!rawLink || !/^https?:\/\//i.test(rawLink)) {
         throw new Error("网页链接不能为空，且必须以 http:// 或 https:// 开头");
       }
@@ -236,6 +281,33 @@ export async function POST(
       }
     }
 
+    if (type === "file") {
+      if (!uploadFile) {
+        throw new Error("请上传文件");
+      }
+      fileExt = assertSupportedKnowledgeFile(uploadFile.name);
+      mimeType = uploadFile.type || "application/octet-stream";
+      fileSize = uploadFile.size;
+      collectionName = collectionName.trim() || uploadFile.name;
+      const buffer = Buffer.from(await uploadFile.arrayBuffer());
+      content = await parseKnowledgeFile(uploadFile.name, buffer);
+      if (!content.trim()) {
+        throw new Error("文件内容解析为空，请检查文件格式或内容");
+      }
+
+      await ensureBuckets();
+      const safeName = uploadFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      fileKey = `knowledge/${user.userId}/${datasetId}/${Date.now()}-${nanoid()}-${safeName}`;
+      await minioClient.putObject(STORAGE_PRIVATE_BUCKET, fileKey, buffer, buffer.length, {
+        "Content-Type": mimeType,
+      });
+      fileUrl = getPrivateUrl(fileKey);
+    }
+
+    if (!collectionName || !collectionName.trim()) {
+      throw new Error("集合名称不能为空");
+    }
+
     if (!content.trim()) {
       throw new Error("内容不能为空");
     }
@@ -243,9 +315,15 @@ export async function POST(
     const collection = await CollectionModel.create({
       userId: user.userId,
       datasetId,
-      name: name.trim(),
+      name: collectionName.trim(),
       type,
       tags: tags || [],
+      fileId: fileKey || undefined,
+      fileKey: fileKey || undefined,
+      fileUrl: fileUrl || undefined,
+      fileExt: fileExt || undefined,
+      fileSize: fileSize || undefined,
+      mimeType: mimeType || undefined,
       rawLink: type === "link" ? rawLink : undefined,
       rawTextLength: content.length,
       chunkSize: dataset.chunkSize,
@@ -254,16 +332,19 @@ export async function POST(
 
     const chunkSize = dataset.chunkSize || 512;
     const chunkSplitter = dataset.chunkSplitter || "";
-    const vectorModel = dataset.vectorModel || process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small";
+    const embeddingModelId = String(dataset.embeddingModelId || "");
+    if (!embeddingModelId) {
+      throw new Error("知识库未配置嵌入模型");
+    }
 
     const result = await processTextToVectors({
       userId: user.userId,
       datasetId,
       collectionId: String(collection._id),
+      embeddingModelId,
       rawText: content,
       chunkSize,
       chunkSplitter,
-      vectorModel,
     });
 
     collection.updateTime = new Date();
@@ -280,6 +361,8 @@ export async function POST(
       name: collection.name,
       type: collection.type,
       tags: collection.tags,
+      fileExt: collection.fileExt,
+      fileSize: collection.fileSize,
       rawLink: collection.rawLink,
       rawTextLength: content.length,
       createTime: collection.createTime,

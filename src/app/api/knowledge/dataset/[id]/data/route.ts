@@ -5,6 +5,7 @@ import { requireKnowledgePermission } from "@/lib/auth/fastgpt-auth";
 import { getDatasetModel, getDatasetDataModel } from "@/lib/models/dataset";
 import { insertVectors } from "@/lib/infra/milvus";
 import { getEmbedding } from "@/lib/ai/embedding";
+import { resolveEmbeddingRuntimeModel } from "@/lib/ai/runtime-model";
 
 function splitTextChunks(text: string, chunkSize: number, overlap: number, splitter?: string): string[] {
   if (splitter && text.includes(splitter)) {
@@ -136,7 +137,11 @@ export async function POST(
 
     const chunkSize = dataset.chunkSize || 512;
     const chunkSplitter = dataset.chunkSplitter || "";
-    const vectorModel = dataset.vectorModel || process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small";
+    const embeddingModelId = String(dataset.embeddingModelId || "");
+    if (!embeddingModelId) {
+      throw new Error("知识库未配置嵌入模型");
+    }
+    const embeddingModel = await resolveEmbeddingRuntimeModel(embeddingModelId);
     const overlap = Math.floor(chunkSize * 0.2);
 
     const DataModel = await getDatasetDataModel();
@@ -180,13 +185,18 @@ export async function POST(
         return doc?.q || "";
       });
 
-      const embeddings = await getEmbedding(vectorModel, allTexts);
+      const embeddings = await getEmbedding(embeddingModel.model, allTexts, {
+        baseUrl: embeddingModel.baseUrl,
+        apiKey: embeddingModel.apiKey,
+        model: embeddingModel.model,
+        defaultConfig: embeddingModel.defaultConfig
+      });
 
       for (let i = 0; i < vectorEntries.length; i++) {
         vectorEntries[i].vector = embeddings[i];
       }
 
-      await insertVectors({ teamId: user.userId, vectors: vectorEntries });
+      await insertVectors({ teamId: user.userId, embeddingModelId, vectors: vectorEntries });
     }
 
     await Dataset.updateOne(

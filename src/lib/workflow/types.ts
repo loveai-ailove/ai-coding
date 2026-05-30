@@ -89,6 +89,8 @@ export interface NodeDispatchResult<T = Record<string, any>, E = Record<string, 
   memories?: Record<string, any>;
   interactive?: InteractiveResponseType;
   customFeedbacks?: string[];
+  /** Stream callback for sending real-time updates */
+  streamCallback?: (event: string, data: any) => void;
 }
 
 export interface NodeResponseItemType {
@@ -143,6 +145,25 @@ export interface NodeDebugSnapshot {
     max_tokens?: number;
     [key: string]: any;
   };
+  /** LLM response details including thinking process */
+  llmResponse?: {
+    thinking?: string;
+    answer?: string;
+    rawContent?: string;
+  };
+  /** API requests made during node execution */
+  apiRequests?: Array<{
+    type: 'llm' | 'embedding' | 'vector_search' | 'database' | 'http' | 'sandbox';
+    name: string;
+    url?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    body?: any;
+    response?: any;
+    duration?: number;
+    status?: 'success' | 'error';
+    error?: string;
+  }>;
 }
 
 export interface DispatchContext {
@@ -172,5 +193,7 @@ export interface DispatchContext {
     instruction?: string;
   };
   streamResponse?: (event: string, data: string | Record<string, any>) => void;
+  /** Stream callback for sending real-time updates during node execution */
+  streamCallback?: (event: string, data: any) => void;
   executionLogs?: WorkflowExecutionLogItem[];
 }

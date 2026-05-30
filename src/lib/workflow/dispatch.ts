@@ -390,6 +390,8 @@ export class WorkflowQueue {
           runningTime: nodeResponse.runningTime,
           timestamp: new Date().toISOString(),
           llmRequest: nodeResponse.llmRequest,
+          llmResponse: nodeResponse.llmResponse,
+          apiRequests: nodeResponse.apiRequests,
         });
       }
 

@@ -3,6 +3,8 @@ import { handleApiError } from "@/lib/api";
 import { requireKnowledgePermission } from "@/lib/auth/fastgpt-auth";
 import { getDatasetModel, getDatasetCollectionModel, getDatasetDataModel } from "@/lib/models/dataset";
 import { deleteVectors } from "@/lib/infra/milvus";
+import { getRequiredAiModel, parseAiModelId } from "@/lib/ai/model-manager";
+import { AiModelType } from "@/generated/prisma/client";
 
 export async function GET(
   _request: Request,
@@ -42,6 +44,11 @@ export async function GET(
       type: dataset.type,
       avatar: dataset.avatar,
       intro: dataset.intro,
+      embeddingModelId: dataset.embeddingModelId,
+      embeddingModelName: dataset.embeddingModelName,
+      embeddingDimension: dataset.embeddingDimension,
+      llmModelId: dataset.llmModelId,
+      llmModelName: dataset.llmModelName,
       vectorModel: dataset.vectorModel,
       agentModel: dataset.agentModel,
       chunkSize: dataset.chunkSize,
@@ -65,7 +72,7 @@ export async function PUT(
     const { id } = await params;
 
     const body = await request.json();
-    const { name, intro, vectorModel, agentModel, chunkSize, chunkSplitter, qaPrompt, avatar } = body;
+    const { name, intro, llmModelId, chunkSize, chunkSplitter, qaPrompt, avatar } = body;
 
     const Dataset = await getDatasetModel();
     const dataset = await Dataset.findOne({
@@ -86,8 +93,19 @@ export async function PUT(
     }
 
     if (intro !== undefined) dataset.intro = intro;
-    if (vectorModel !== undefined) dataset.vectorModel = vectorModel;
-    if (agentModel !== undefined) dataset.agentModel = agentModel;
+    if (body.embeddingModelId !== undefined && String(body.embeddingModelId) !== String(dataset.embeddingModelId || "")) {
+      throw new Error("知识库创建后不允许修改嵌入模型，如需更换请新建知识库");
+    }
+    if (llmModelId !== undefined) {
+      const parsedLlmModelId = parseAiModelId(llmModelId);
+      if (parsedLlmModelId === null) {
+        throw new Error("语言模型ID无效");
+      }
+      const llmModel = await getRequiredAiModel(parsedLlmModelId, AiModelType.LLM);
+      dataset.llmModelId = String(llmModel.id);
+      dataset.llmModelName = llmModel.name;
+      dataset.agentModel = llmModel.model;
+    }
     if (chunkSize !== undefined) dataset.chunkSize = chunkSize;
     if (chunkSplitter !== undefined) dataset.chunkSplitter = chunkSplitter;
     if (qaPrompt !== undefined) dataset.qaPrompt = qaPrompt;
@@ -102,6 +120,11 @@ export async function PUT(
       type: dataset.type,
       avatar: dataset.avatar,
       intro: dataset.intro,
+      embeddingModelId: dataset.embeddingModelId,
+      embeddingModelName: dataset.embeddingModelName,
+      embeddingDimension: dataset.embeddingDimension,
+      llmModelId: dataset.llmModelId,
+      llmModelName: dataset.llmModelName,
       vectorModel: dataset.vectorModel,
       agentModel: dataset.agentModel,
       chunkSize: dataset.chunkSize,
@@ -157,6 +180,7 @@ export async function DELETE(
       if (vectorIds.length > 0) {
         await deleteVectors({
           teamId: user.userId,
+          embeddingModelId: String(dataset.embeddingModelId || "default"),
           ids: vectorIds,
         });
       }

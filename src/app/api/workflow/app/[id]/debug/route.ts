@@ -16,7 +16,7 @@ export async function POST(
     const { id } = await params;
 
     const body = await request.json();
-    const { chatId, messages, variables = {}, modules, edges } = body;
+    const { chatId, messages, variables = {}, modules, edges, stream = false } = body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       throw new Error("消息不能为空");
@@ -97,6 +97,122 @@ export async function POST(
       avatar: module.avatar,
     }));
 
+    // If streaming is requested, use SSE
+    if (stream) {
+      const encoder = new TextEncoder();
+      const streamResponse = new ReadableStream({
+        async start(controller) {
+          // Helper to send SSE event
+          const sendEvent = (event: string, data: any) => {
+            controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+          };
+          
+          const ctx: DispatchContext = {
+            userId: user.userId,
+            appId: id,
+            variables: { ...variables },
+            variableRecord: {},
+            histories: messages.slice(0, -1).map((m: { obj: string; value: string }) => ({
+              obj: m.obj as "Human" | "AI",
+              value: m.value,
+            })),
+            userChatInput: lastMessage.value,
+            query: lastMessage.value,
+            runtimeNodes,
+            runtimeEdges,
+            mode: "debug",
+            isRootRuntime: true,
+            chatConfig: app.chatConfig || {},
+            streamCallback: sendEvent,
+          };
+          
+          try {
+            sendEvent("start", { message: "开始执行工作流" });
+            
+            const result = await runWorkflow(ctx);
+            
+            // Save to database
+            const Chat = await getChatModel();
+            const ChatItem = await getChatItemModel();
+            
+            let chat;
+            if (chatId) {
+              chat = await Chat.findOne({
+                _id: chatId,
+                appId: id,
+                userId: user.userId,
+              });
+              if (!chat) {
+                chat = await Chat.create({
+                  appId: id,
+                  userId: user.userId,
+                  title: lastMessage.value.slice(0, 50),
+                  source: "test",
+                });
+              } else {
+                await Chat.findByIdAndUpdate(chatId, { updateTime: new Date() });
+              }
+            } else {
+              chat = await Chat.create({
+                appId: id,
+                userId: user.userId,
+                title: lastMessage.value.slice(0, 50),
+                source: "test",
+              });
+            }
+            
+            await ChatItem.create({
+              chatId: chat._id,
+              userId: user.userId,
+              appId: id,
+              obj: "Human",
+              value: lastMessage.value,
+              time: new Date(),
+            });
+            
+            await ChatItem.create({
+              chatId: chat._id,
+              userId: user.userId,
+              appId: id,
+              obj: "AI",
+              value: result.outputText,
+              responseData: result.nodeResponses,
+              time: new Date(),
+            });
+            
+            // Send final result
+            sendEvent("done", {
+              chatId: chat._id,
+              outputText: result.outputText,
+              nodeResponses: result.nodeResponses,
+              variables: result.variables,
+              memoryNodes: result.memoryNodes,
+              memoryEdges: result.memoryEdges,
+              entryNodeIds: result.entryNodeIds,
+              debugNodeResponses: result.debugNodeResponses,
+              skipNodeQueue: result.skipNodeQueue,
+              interactiveResponse: result.interactiveResponse,
+              executionLogs: result.executionLogs,
+              nodeSnapshots: result.nodeSnapshots,
+            });
+          } catch (error) {
+            sendEvent("error", { error: error instanceof Error ? error.message : "执行失败" });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      
+      return new Response(streamResponse, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        },
+      });
+    }
+    
+    // Non-streaming response (original behavior)
     const ctx: DispatchContext = {
       userId: user.userId,
       appId: id,

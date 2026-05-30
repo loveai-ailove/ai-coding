@@ -5,15 +5,31 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { SidebarMenuItem } from "@/types/system";
 
+function matchesOwnPath(item: SidebarMenuItem, pathname: string) {
+  if (!item.path) return false;
+  if (item.path === "/admin") return pathname === "/admin";
+
+  // Parents with children are highlighted through descendant matches,
+  // so their own route only matches exactly.
+  if (item.children.length > 0) {
+    return pathname === item.path;
+  }
+
+  return pathname === item.path || pathname.startsWith(`${item.path}/`);
+}
+
+function isNodeActive(item: SidebarMenuItem, pathname: string): boolean {
+  if (matchesOwnPath(item, pathname)) {
+    return true;
+  }
+
+  return item.children.some((child) => isNodeActive(child, pathname));
+}
+
 function SidebarNode({ item, pathname, onClick }: { item: SidebarMenuItem; pathname: string; onClick?: () => void }) {
   const [expanded, setExpanded] = useState(true);
   const hasChildren = item.children.length > 0;
-
-  const isActive = item.path
-    ? item.path === "/admin"
-      ? pathname === "/admin"
-      : pathname === item.path || pathname.startsWith(`${item.path}/`)
-    : false;
+  const isActive = isNodeActive(item, pathname);
 
   return (
     <div className="space-y-1">

@@ -16,6 +16,11 @@ const DatasetSchema = new Schema({
   avatar: { type: String, default: "/icon/logo.svg" },
   name: { type: String, required: true },
   intro: { type: String, default: "" },
+  embeddingModelId: { type: String, default: "" },
+  embeddingModelName: { type: String, default: "" },
+  embeddingDimension: { type: Number },
+  llmModelId: { type: String, default: "" },
+  llmModelName: { type: String, default: "" },
   vectorModel: { type: String, default: process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small" },
   agentModel: { type: String, default: process.env.DEFAULT_LLM_MODEL || "qwen-max" },
   updateTime: { type: Date, default: () => new Date() },
@@ -41,6 +46,11 @@ const DatasetCollectionSchema = new Schema({
   name: { type: String, required: true },
   tags: { type: [String], default: [] },
   fileId: { type: String },
+  fileKey: { type: String },
+  fileUrl: { type: String },
+  fileExt: { type: String },
+  fileSize: { type: Number },
+  mimeType: { type: String },
   rawLink: { type: String },
   rawTextLength: { type: Number },
   hashRawText: { type: String },
@@ -126,6 +136,11 @@ export interface DatasetDoc {
   avatar: string;
   name: string;
   intro: string;
+  embeddingModelId: string;
+  embeddingModelName: string;
+  embeddingDimension?: number;
+  llmModelId: string;
+  llmModelName: string;
   vectorModel: string;
   agentModel: string;
   updateTime: Date;
@@ -144,6 +159,11 @@ export interface DatasetCollectionDoc {
   name: string;
   tags: string[];
   fileId?: string;
+  fileKey?: string;
+  fileUrl?: string;
+  fileExt?: string;
+  fileSize?: number;
+  mimeType?: string;
   rawLink?: string;
   rawTextLength?: number;
   hashRawText?: string;

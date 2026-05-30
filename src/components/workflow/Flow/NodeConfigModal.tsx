@@ -5,8 +5,16 @@ import { useEffect, useMemo, useState } from "react";
 export interface DatasetOption {
   id: string;
   name: string;
+  embeddingModelId?: string;
+  embeddingModelName?: string;
   vectorModel?: string;
   type?: string;
+}
+
+export interface LlmModelOption {
+  id: string;
+  name: string;
+  model: string;
 }
 
 type EditableNodeType =
@@ -26,6 +34,7 @@ interface NodeConfigModalProps {
     data?: Record<string, any>;
   } | null;
   datasets: DatasetOption[];
+  llmModels: LlmModelOption[];
   loadingDatasets?: boolean;
   onClose: () => void;
   onSave: (payload: Record<string, any>) => void;
@@ -197,6 +206,7 @@ export function NodeConfigModal({
   open,
   node,
   datasets,
+  llmModels,
   loadingDatasets = false,
   onClose,
   onSave,
@@ -225,7 +235,12 @@ export function NodeConfigModal({
     if (nodeType === "chatNode") {
       payload.history = Number(payload.history || 6);
       payload.temperature = Number(payload.temperature || 0.7);
-      payload.maxToken = Number(payload.maxToken || 2000);
+      payload.maxToken = Number(payload.maxToken || 32000);
+      const selectedModel = llmModels.find((item) => item.id === String(payload.model || ""));
+      if (selectedModel) {
+        payload.modelName = selectedModel.name;
+        payload.modelCode = selectedModel.model;
+      }
     }
 
     if (nodeType === "datasetSearchNode") {
@@ -235,6 +250,8 @@ export function NodeConfigModal({
         id: item.id,
         datasetId: item.datasetId || item.id,
         name: item.name,
+        embeddingModelId: item.embeddingModelId,
+        embeddingModelName: item.embeddingModelName,
         vectorModel: item.vectorModel,
       }));
     }
@@ -337,11 +354,18 @@ export function NodeConfigModal({
           {nodeType === "chatNode" && (
             <>
               <div className="grid gap-4 md:grid-cols-2">
-                <TextInput
+                <SelectInput
                   label="模型"
-                  value={String(form.model || "")}
+                  value={String(form.model || llmModels[0]?.id || "")}
                   onChange={(value) => setForm((prev) => ({ ...prev, model: value }))}
-                  placeholder="例如 qwen-max"
+                  options={
+                    llmModels.length > 0
+                      ? llmModels.map((item) => ({
+                          value: item.id,
+                          label: `${item.name} (${item.model})`,
+                        }))
+                      : [{ value: "", label: "暂无可用模型" }]
+                  }
                 />
                 <TextInput
                   label="历史轮数"
@@ -366,7 +390,7 @@ export function NodeConfigModal({
                 />
                 <TextInput
                   label="最大 Token"
-                  value={String(form.maxToken ?? 2000)}
+                  value={String(form.maxToken ?? 32000)}
                   onChange={(value) => setForm((prev) => ({ ...prev, maxToken: value }))}
                   type="number"
                 />
@@ -412,6 +436,8 @@ export function NodeConfigModal({
                                           id: dataset.id,
                                           datasetId: dataset.id,
                                           name: dataset.name,
+                                          embeddingModelId: dataset.embeddingModelId,
+                                          embeddingModelName: dataset.embeddingModelName,
                                           vectorModel: dataset.vectorModel,
                                         },
                                       ],
@@ -432,6 +458,9 @@ export function NodeConfigModal({
                             <div>
                               <div className="font-medium text-gray-800">{dataset.name}</div>
                               <div className="text-xs text-gray-500">{dataset.vectorModel || "默认向量模型"}</div>
+                              {dataset.embeddingModelName ? (
+                                <div className="text-xs text-gray-400">嵌入模型: {dataset.embeddingModelName}</div>
+                              ) : null}
                             </div>
                           </label>
                         );

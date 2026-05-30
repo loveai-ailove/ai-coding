@@ -1,29 +1,32 @@
 import { MenuType, Status, type PrismaClient } from "@/generated/prisma/client";
 
 export async function seedKnowledgeAndWorkflowMenus(tx: PrismaClient) {
-  const existingKnowledge = await tx.sysMenu.findFirst({ where: { path: "/admin/knowledge" } });
-  if (existingKnowledge) {
+  const existingAiCenter = await tx.sysMenu.findFirst({ where: { name: "AI中心", type: MenuType.DIRECTORY } });
+  if (existingAiCenter) {
     console.log("[seed] Knowledge menus already exist, skipping");
     return;
   }
 
-  const knowledgeRoot = await tx.sysMenu.create({
+  const aiCenter = await tx.sysMenu.create({
     data: {
-      name: "知识库管理",
+      name: "AI中心",
       type: MenuType.DIRECTORY,
-      path: "/admin/knowledge",
-      icon: "book-open",
+      path: "/admin/ai-center",
+      component: "admin/ai-center/page",
+      icon: "bot",
       orderNum: 3,
       status: Status.ACTIVE,
     },
   });
 
-  await tx.sysMenu.create({
+  const knowledgeRoot = await tx.sysMenu.create({
     data: {
-      parentId: knowledgeRoot.id,
-      name: "知识库列表",
+      parentId: aiCenter.id,
+      name: "知识库管理",
       type: MenuType.MENU,
       path: "/admin/knowledge",
+      component: "admin/knowledge/page",
+      icon: "book-open",
       perms: "knowledge:read",
       orderNum: 1,
       status: Status.ACTIVE,
@@ -65,23 +68,14 @@ export async function seedKnowledgeAndWorkflowMenus(tx: PrismaClient) {
 
   const workflowRoot = await tx.sysMenu.create({
     data: {
+      parentId: aiCenter.id,
       name: "工作流管理",
-      type: MenuType.DIRECTORY,
-      path: "/admin/workflow",
-      icon: "workflow",
-      orderNum: 4,
-      status: Status.ACTIVE,
-    },
-  });
-
-  await tx.sysMenu.create({
-    data: {
-      parentId: workflowRoot.id,
-      name: "工作流列表",
       type: MenuType.MENU,
       path: "/admin/workflow",
+      component: "admin/workflow/page",
+      icon: "workflow",
       perms: "workflow:read",
-      orderNum: 1,
+      orderNum: 2,
       status: Status.ACTIVE,
     },
   });

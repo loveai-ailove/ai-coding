@@ -22,7 +22,7 @@ import {
   type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { NodeConfigModal, type DatasetOption } from "./NodeConfigModal";
+import { NodeConfigModal, type DatasetOption, type LlmModelOption } from "./NodeConfigModal";
 import {
   createWorkflowNodeModule,
   getNodeConnectableInputs,
@@ -71,6 +71,7 @@ function buildCanvasDataFromModule(module: Record<string, any>) {
     ...inputValues,
     label: normalized.name,
     model: normalized.inputs?.find((input: any) => input.key === "model")?.value,
+    modelName: normalized.inputs?.find((input: any) => input.key === "modelName")?.value,
     systemPrompt: normalized.inputs?.find((input: any) => input.key === "system_chat_prompt")?.value,
     answerText: normalized.inputs?.find((input: any) => input.key === "answerText")?.value,
     url: normalized.inputs?.find((input: any) => input.key === "system_httpReqUrl")?.value,
@@ -246,11 +247,8 @@ function ChatNodeComponent({ data }: NodeProps) {
         <span className="text-sm font-semibold text-gray-800">AI 对话</span>
       </div>
       <div className="mt-2 text-xs text-gray-500">
-        模型: {String(data.model || "默认")}
+        模型: {String(data.modelName || data.model || "默认")}
       </div>
-      {String(data.systemPrompt || "") && (
-        <div className="mt-1 line-clamp-2 text-xs text-gray-400">{String(data.systemPrompt).slice(0, 50)}...</div>
-      )}
       {renderSourceHandles(data, "#3b82f6")}
     </NodeShell>
   );
@@ -643,6 +641,7 @@ export function FlowCanvas({
   const [canvasEdges, setCanvasEdges] = useState<Edge[]>(rfEdges);
   const [editingNode, setEditingNode] = useState<CanvasNode | null>(null);
   const [datasetOptions, setDatasetOptions] = useState<DatasetOption[]>([]);
+  const [llmModelOptions, setLlmModelOptions] = useState<LlmModelOption[]>([]);
   const [loadingDatasets, setLoadingDatasets] = useState(false);
   const rfInstanceRef = useRef<ReactFlowInstance<CanvasNode, Edge> | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -685,9 +684,13 @@ export function FlowCanvas({
     const loadDatasets = async () => {
       setLoadingDatasets(true);
       try {
-        const res = await fetch("/api/knowledge/dataset?pageSize=100");
-        if (!res.ok) return;
-        const data = await res.json();
+        const [datasetRes, llmRes] = await Promise.all([
+          fetch("/api/knowledge/dataset?pageSize=100"),
+          fetch("/api/ai/models?type=LLM"),
+        ]);
+        if (!datasetRes.ok || !llmRes.ok) return;
+        const data = await datasetRes.json();
+        const llmData = await llmRes.json();
         if (!active) return;
         setDatasetOptions(
           (data.list || [])
@@ -695,9 +698,18 @@ export function FlowCanvas({
             .map((item: any) => ({
               id: String(item.id),
               name: String(item.name),
+              embeddingModelId: item.embeddingModelId,
+              embeddingModelName: item.embeddingModelName,
               vectorModel: item.vectorModel,
               type: item.type,
             }))
+        );
+        setLlmModelOptions(
+          (llmData.list || []).map((item: any) => ({
+            id: String(item.id),
+            name: String(item.name),
+            model: String(item.model),
+          }))
         );
       } finally {
         if (active) {
@@ -1006,6 +1018,7 @@ export function FlowCanvas({
         open={!!editingNode}
         node={editingNode}
         datasets={datasetOptions}
+        llmModels={llmModelOptions}
         loadingDatasets={loadingDatasets}
         onClose={() => setEditingNode(null)}
         onSave={(payload) => {

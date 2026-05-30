@@ -8,19 +8,27 @@ interface Dataset {
   name: string;
   intro: string;
   type: string;
+  embeddingModelId?: string;
+  embeddingModelName?: string;
+  embeddingDimension?: number;
+  llmModelId?: string;
+  llmModelName?: string;
   vectorModel: string;
   agentModel: string;
   updateTime: string;
 }
 
-export function KnowledgeList({
-  defaultEmbeddingModel,
-  defaultLlmModel,
-}: {
-  defaultEmbeddingModel: string;
-  defaultLlmModel: string;
-}) {
+interface ModelOption {
+  id: string;
+  name: string;
+  model: string;
+  embeddingDimension?: number | null;
+}
+
+export function KnowledgeList() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [embeddingModels, setEmbeddingModels] = useState<ModelOption[]>([]);
+  const [llmModels, setLlmModels] = useState<ModelOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState("");
@@ -29,13 +37,28 @@ export function KnowledgeList({
     setLoading(true);
     setError("");
     try {
-      const res = await fetch("/api/knowledge/dataset?pageSize=50");
-      const data = await res.json();
-      if (res.ok) {
-        setDatasets(Array.isArray(data?.list) ? data.list : []);
-      } else {
-        throw new Error(data.error || "获取知识库列表失败");
+      const [datasetRes, embeddingRes, llmRes] = await Promise.all([
+        fetch("/api/knowledge/dataset?pageSize=50"),
+        fetch("/api/ai/models?type=EMBEDDING"),
+        fetch("/api/ai/models?type=LLM"),
+      ]);
+      const [datasetData, embeddingData, llmData] = await Promise.all([
+        datasetRes.json(),
+        embeddingRes.json(),
+        llmRes.json(),
+      ]);
+      if (!datasetRes.ok) {
+        throw new Error(datasetData.error || "获取知识库列表失败");
       }
+      if (!embeddingRes.ok) {
+        throw new Error(embeddingData.error || "获取嵌入模型失败");
+      }
+      if (!llmRes.ok) {
+        throw new Error(llmData.error || "获取语言模型失败");
+      }
+      setDatasets(Array.isArray(datasetData?.list) ? datasetData.list : []);
+      setEmbeddingModels(Array.isArray(embeddingData?.list) ? embeddingData.list : []);
+      setLlmModels(Array.isArray(llmData?.list) ? llmData.list : []);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "获取知识库列表失败");
     } finally {
@@ -82,7 +105,10 @@ export function KnowledgeList({
               <h3 className="mt-3 text-base font-semibold text-gray-900">{ds.name}</h3>
               <p className="mt-1 line-clamp-2 text-sm text-gray-500">{ds.intro || "暂无简介"}</p>
               <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
-                <span className="rounded bg-gray-100 px-1.5 py-0.5">{ds.vectorModel}</span>
+                <span className="rounded bg-gray-100 px-1.5 py-0.5">{ds.embeddingModelName || ds.vectorModel}</span>
+                {ds.embeddingDimension ? (
+                  <span className="rounded bg-gray-100 px-1.5 py-0.5">{ds.embeddingDimension} 维</span>
+                ) : null}
                 <span>{new Date(ds.updateTime).toLocaleDateString()}</span>
               </div>
             </Link>
@@ -94,8 +120,8 @@ export function KnowledgeList({
 
       {showCreate && (
         <CreateDatasetModal
-          defaultEmbeddingModel={defaultEmbeddingModel}
-          defaultLlmModel={defaultLlmModel}
+          embeddingModels={embeddingModels}
+          llmModels={llmModels}
           onClose={() => setShowCreate(false)}
           onSuccess={fetchDatasets}
         />
@@ -105,27 +131,47 @@ export function KnowledgeList({
 }
 
 function CreateDatasetModal({
-  defaultEmbeddingModel,
-  defaultLlmModel,
+  embeddingModels,
+  llmModels,
   onClose,
   onSuccess,
 }: {
-  defaultEmbeddingModel: string;
-  defaultLlmModel: string;
+  embeddingModels: ModelOption[];
+  llmModels: ModelOption[];
   onClose: () => void;
   onSuccess: () => void;
 }) {
   const [name, setName] = useState("");
   const [intro, setIntro] = useState("");
-  const [vectorModel, setVectorModel] = useState(defaultEmbeddingModel);
-  const [agentModel, setAgentModel] = useState(defaultLlmModel);
+  const [embeddingModelId, setEmbeddingModelId] = useState(embeddingModels[0]?.id || "");
+  const [llmModelId, setLlmModelId] = useState(llmModels[0]?.id || "");
   const [chunkSize, setChunkSize] = useState(512);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    if (!embeddingModelId && embeddingModels[0]?.id) {
+      setEmbeddingModelId(embeddingModels[0].id);
+    }
+  }, [embeddingModelId, embeddingModels]);
+
+  useEffect(() => {
+    if (!llmModelId && llmModels[0]?.id) {
+      setLlmModelId(llmModels[0].id);
+    }
+  }, [llmModelId, llmModels]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
+    if (!embeddingModelId) {
+      setError("请先选择嵌入模型");
+      return;
+    }
+    if (!llmModelId) {
+      setError("请先选择语言模型");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
@@ -135,8 +181,8 @@ function CreateDatasetModal({
         body: JSON.stringify({
           name,
           intro,
-          vectorModel,
-          agentModel,
+          embeddingModelId,
+          llmModelId,
           chunkSize,
           type: "dataset",
         }),
@@ -170,13 +216,30 @@ function CreateDatasetModal({
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700">向量模型</label>
-              <input value={vectorModel} onChange={(e) => setVectorModel(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
+              <label className="block text-sm font-medium text-gray-700">嵌入模型</label>
+              <select value={embeddingModelId} onChange={(e) => setEmbeddingModelId(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+                {embeddingModels.length === 0 ? <option value="">暂无可用嵌入模型</option> : null}
+                {embeddingModels.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name} ({item.embeddingDimension || "-"} 维)
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700">AI模型</label>
-              <input value={agentModel} onChange={(e) => setAgentModel(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" />
+              <label className="block text-sm font-medium text-gray-700">语言模型</label>
+              <select value={llmModelId} onChange={(e) => setLlmModelId(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+                {llmModels.length === 0 ? <option value="">暂无可用语言模型</option> : null}
+                {llmModels.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name} ({item.model})
+                  </option>
+                ))}
+              </select>
             </div>
+          </div>
+          <div className="rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-700">
+            嵌入模型在知识库创建后不可修改，如需更换请重新创建新的知识库。
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700">分块大小</label>
@@ -184,7 +247,7 @@ function CreateDatasetModal({
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <button type="button" onClick={onClose} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">取消</button>
-            <button type="submit" disabled={loading || !name.trim()} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">{loading ? "创建中..." : "创建"}</button>
+            <button type="submit" disabled={loading || !name.trim() || !embeddingModelId || !llmModelId} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">{loading ? "创建中..." : "创建"}</button>
           </div>
         </form>
       </div>

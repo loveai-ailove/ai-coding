@@ -27,14 +27,18 @@ type SearchVectorHit = {
   dataId: string;
 };
 
-function getCollectionName(teamId: string) {
-  return `${VECTOR_COLLECTION_PREFIX}${teamId.replace(/-/g, "").slice(0, 20)}`;
+function buildSafeKey(value: string) {
+  return value.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20) || "default";
 }
 
-export async function initVectorCollection(teamId: string, dim: number): Promise<string> {
+function getCollectionName(teamId: string, embeddingModelId: string) {
+  return `${VECTOR_COLLECTION_PREFIX}${buildSafeKey(teamId)}_${buildSafeKey(embeddingModelId)}`;
+}
+
+export async function initVectorCollection(teamId: string, embeddingModelId: string, dim: number): Promise<string> {
   const client = getMilvusClient();
   if (!client) throw new Error("Milvus is not configured");
-  const collectionName = getCollectionName(teamId);
+  const collectionName = getCollectionName(teamId, embeddingModelId);
   const has = await client.hasCollection({ collection_name: collectionName });
   if (has.value) return collectionName;
 
@@ -67,6 +71,7 @@ export async function initVectorCollection(teamId: string, dim: number): Promise
 
 export async function insertVectors(params: {
   teamId: string;
+  embeddingModelId: string;
   vectors: Array<{
     id: string;
     datasetId: string;
@@ -77,9 +82,9 @@ export async function insertVectors(params: {
 }): Promise<string[]> {
   const client = getMilvusClient();
   if (!client) throw new Error("Milvus is not configured");
-  const collectionName = getCollectionName(params.teamId);
+  const collectionName = getCollectionName(params.teamId, params.embeddingModelId);
   const dim = params.vectors[0]?.vector.length || 0;
-  await initVectorCollection(params.teamId, dim);
+  await initVectorCollection(params.teamId, params.embeddingModelId, dim);
 
   const data = params.vectors.map((v) => ({
     id: v.id,
@@ -96,12 +101,13 @@ export async function insertVectors(params: {
 
 export async function deleteVectors(params: {
   teamId: string;
+  embeddingModelId: string;
   ids?: string[];
   filter?: string;
 }): Promise<void> {
   const client = getMilvusClient();
   if (!client) return;
-  const collectionName = getCollectionName(params.teamId);
+  const collectionName = getCollectionName(params.teamId, params.embeddingModelId);
   const has = await client.hasCollection({ collection_name: collectionName });
   if (!has.value) return;
 
@@ -115,6 +121,7 @@ export async function deleteVectors(params: {
 
 export async function searchVectors(params: {
   teamId: string;
+  embeddingModelId: string;
   vector: number[];
   topK: number;
   filter?: string;
@@ -122,7 +129,7 @@ export async function searchVectors(params: {
 }): Promise<SearchVectorHit[]> {
   const client = getMilvusClient();
   if (!client) throw new Error("Milvus is not configured");
-  const collectionName = getCollectionName(params.teamId);
+  const collectionName = getCollectionName(params.teamId, params.embeddingModelId);
   const has = await client.hasCollection({ collection_name: collectionName });
   if (!has.value) return [];
   await client.loadCollection({ collection_name: collectionName });

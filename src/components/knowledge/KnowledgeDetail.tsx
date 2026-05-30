@@ -8,6 +8,8 @@ interface Collection {
   name: string;
   type: string;
   tags: string[];
+  fileExt?: string;
+  fileSize?: number;
   rawTextLength?: number;
   createTime: string;
   dataCount?: number;
@@ -17,6 +19,11 @@ interface DatasetDetail {
   id: string;
   name: string;
   intro: string;
+  embeddingModelId?: string;
+  embeddingModelName?: string;
+  embeddingDimension?: number;
+  llmModelId?: string;
+  llmModelName?: string;
   vectorModel: string;
   agentModel: string;
   chunkSize: number;
@@ -93,9 +100,13 @@ export function KnowledgeDetail({ datasetId }: { datasetId: string }) {
       </div>
 
       <div className="flex gap-4 text-sm text-gray-500">
-        <span>向量模型: {dataset.vectorModel}</span>
-        <span>AI模型: {dataset.agentModel}</span>
+        <span>嵌入模型: {dataset.embeddingModelName || dataset.vectorModel}</span>
+        {dataset.embeddingDimension ? <span>维度: {dataset.embeddingDimension}</span> : null}
+        <span>AI模型: {dataset.llmModelName || dataset.agentModel}</span>
         <span>分块大小: {dataset.chunkSize}</span>
+      </div>
+      <div className="rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-700">
+        当前知识库已锁定嵌入模型，如需切换嵌入模型，请重新创建一个新的知识库。
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white">
@@ -114,11 +125,14 @@ export function KnowledgeDetail({ datasetId }: { datasetId: string }) {
               <div key={col.id} onClick={() => setActiveCollection(col)} className="flex cursor-pointer items-center justify-between px-6 py-4 hover:bg-gray-50">
                 <div className="flex items-center gap-3">
                   <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50 text-xs font-medium text-blue-600">
-                    {col.type === "text" ? "TXT" : col.type === "link" ? "URL" : "DOC"}
+                    {col.type === "text" ? "TXT" : col.type === "link" ? "URL" : (col.fileExt || "DOC").toUpperCase()}
                   </span>
                   <div>
                     <p className="text-sm font-medium text-gray-900">{col.name}</p>
-                    <p className="text-xs text-gray-400">{col.dataCount ?? 0} 条数据 · {new Date(col.createTime).toLocaleDateString()}</p>
+                    <p className="text-xs text-gray-400">
+                      {col.dataCount ?? 0} 条数据 · {new Date(col.createTime).toLocaleDateString()}
+                      {col.fileSize ? ` · ${Math.ceil(col.fileSize / 1024)} KB` : ""}
+                    </p>
                   </div>
                 </div>
                 <button onClick={(e) => { e.stopPropagation(); handleDeleteCollection(col.id, col.name); }} className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-500" title="删除">
@@ -138,10 +152,11 @@ export function KnowledgeDetail({ datasetId }: { datasetId: string }) {
 }
 
 function CreateCollectionModal({ datasetId, chunkSize, onClose, onSuccess }: { datasetId: string; chunkSize: number; onClose: () => void; onSuccess: () => void }) {
-  const [tab, setTab] = useState<"text" | "link">("text");
+  const [tab, setTab] = useState<"text" | "link" | "file">("text");
   const [name, setName] = useState("");
   const [content, setContent] = useState("");
   const [link, setLink] = useState("");
+  const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -150,14 +165,29 @@ function CreateCollectionModal({ datasetId, chunkSize, onClose, onSuccess }: { d
     setLoading(true);
     setError("");
     try {
-      const body = tab === "text"
-        ? { name: name || "文本数据", type: "text", rawText: content, chunkSize }
-        : { name: name || link, type: "link", rawLink: link, chunkSize };
-      const res = await fetch(`/api/knowledge/dataset/${datasetId}/collections`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      let res: Response;
+      if (tab === "file") {
+        if (!file) {
+          throw new Error("请先选择文件");
+        }
+        const formData = new FormData();
+        formData.append("name", name || file.name);
+        formData.append("type", "file");
+        formData.append("file", file);
+        res = await fetch(`/api/knowledge/dataset/${datasetId}/collections`, {
+          method: "POST",
+          body: formData,
+        });
+      } else {
+        const body = tab === "text"
+          ? { name: name || "文本数据", type: "text", rawText: content, chunkSize }
+          : { name: name || link, type: "link", rawLink: link, chunkSize };
+        res = await fetch(`/api/knowledge/dataset/${datasetId}/collections`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      }
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || "创建集合失败");
@@ -178,22 +208,33 @@ function CreateCollectionModal({ datasetId, chunkSize, onClose, onSuccess }: { d
         <div className="mt-4 flex gap-2">
           <button onClick={() => setTab("text")} className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "text" ? "bg-blue-50 text-blue-600" : "text-gray-500 hover:bg-gray-50"}`}>文本数据</button>
           <button onClick={() => setTab("link")} className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "link" ? "bg-blue-50 text-blue-600" : "text-gray-500 hover:bg-gray-50"}`}>网页链接</button>
+          <button onClick={() => setTab("file")} className={`rounded-lg px-4 py-2 text-sm font-medium ${tab === "file" ? "bg-blue-50 text-blue-600" : "text-gray-500 hover:bg-gray-50"}`}>文件上传</button>
         </div>
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
           {error ? <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-600">{error}</div> : null}
           <div>
             <label className="block text-sm font-medium text-gray-700">名称</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" placeholder={tab === "text" ? "文本数据" : "网页地址"} />
+            <input value={name} onChange={(e) => setName(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" placeholder={tab === "text" ? "文本数据" : tab === "link" ? "网页地址" : "文件名"} />
           </div>
           {tab === "text" ? (
             <div>
               <label className="block text-sm font-medium text-gray-700">内容 <span className="text-red-500">*</span></label>
               <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={10} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-mono" placeholder="请输入文本内容..." />
             </div>
-          ) : (
+          ) : tab === "link" ? (
             <div>
               <label className="block text-sm font-medium text-gray-700">网页链接 <span className="text-red-500">*</span></label>
               <input value={link} onChange={(e) => setLink(e.target.value)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" placeholder="https://example.com/article" />
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700">上传文件 <span className="text-red-500">*</span></label>
+                <input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm" accept=".txt,.md,.html,.pdf,.docx,.xlsx,.csv" />
+              </div>
+              <div className="rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-500">
+                当前支持：txt、md、html、pdf、docx、xlsx、csv
+              </div>
             </div>
           )}
           <div className="flex justify-end gap-3 pt-2">

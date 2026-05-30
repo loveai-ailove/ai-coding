@@ -12,7 +12,7 @@ export async function POST(
     const { id } = await params;
 
     const body = await request.json();
-    const { query, datasetIds, similarity, limit, vectorModel } = body;
+    const { query, datasetIds, similarity, limit, embeddingModelId } = body;
 
     if (!query || !query.trim()) {
       throw new Error("搜索内容不能为空");
@@ -28,7 +28,7 @@ export async function POST(
       query: query.trim(),
       similarity: similarity ?? 0.4,
       limit: limit ?? 20,
-      vectorModel,
+      embeddingModelId,
     });
 
     return NextResponse.json({

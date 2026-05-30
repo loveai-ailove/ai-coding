@@ -3,6 +3,8 @@ import { nanoid } from "nanoid";
 import { handleApiError } from "@/lib/api";
 import { requireKnowledgePermission } from "@/lib/auth/fastgpt-auth";
 import { getDatasetModel } from "@/lib/models/dataset";
+import { ensureDefaultAiModel, getRequiredAiModel, parseAiModelId } from "@/lib/ai/model-manager";
+import { AiModelType } from "@/generated/prisma/client";
 
 export async function GET(request: Request) {
   try {
@@ -44,6 +46,11 @@ export async function GET(request: Request) {
         type: item.type,
         avatar: item.avatar,
         intro: item.intro,
+        embeddingModelId: item.embeddingModelId,
+        embeddingModelName: item.embeddingModelName,
+        embeddingDimension: item.embeddingDimension,
+        llmModelId: item.llmModelId,
+        llmModelName: item.llmModelName,
         vectorModel: item.vectorModel,
         agentModel: item.agentModel,
         chunkSize: item.chunkSize,
@@ -61,7 +68,7 @@ export async function POST(request: Request) {
     const user = await requireKnowledgePermission("knowledge:create");
 
     const body = await request.json();
-    const { name, intro, vectorModel, agentModel, chunkSize, type } = body;
+    const { name, intro, embeddingModelId, llmModelId, chunkSize, type } = body;
 
     if (!name || !name.trim()) {
       throw new Error("知识库名称不能为空");
@@ -72,13 +79,26 @@ export async function POST(request: Request) {
     }
 
     const Dataset = await getDatasetModel();
+    const parsedEmbeddingModelId = parseAiModelId(embeddingModelId);
+    const parsedLlmModelId = parseAiModelId(llmModelId);
+    const embeddingModel = parsedEmbeddingModelId !== null
+      ? await getRequiredAiModel(parsedEmbeddingModelId, AiModelType.EMBEDDING)
+      : await ensureDefaultAiModel(AiModelType.EMBEDDING);
+    const llmModel = parsedLlmModelId !== null
+      ? await getRequiredAiModel(parsedLlmModelId, AiModelType.LLM)
+      : await ensureDefaultAiModel(AiModelType.LLM);
 
     const dataset = await Dataset.create({
       userId: user.userId,
       name: name.trim(),
       intro: intro || "",
-      vectorModel: vectorModel || process.env.DEFAULT_EMBEDDING_MODEL || "text-embedding-3-small",
-      agentModel: agentModel || process.env.DEFAULT_LLM_MODEL || "qwen-max",
+      embeddingModelId: String(embeddingModel.id),
+      embeddingModelName: embeddingModel.name,
+      embeddingDimension: embeddingModel.embeddingDimension || undefined,
+      llmModelId: String(llmModel.id),
+      llmModelName: llmModel.name,
+      vectorModel: embeddingModel.model,
+      agentModel: llmModel.model,
       chunkSize: chunkSize || 512,
       type,
     });
@@ -89,6 +109,11 @@ export async function POST(request: Request) {
       type: dataset.type,
       avatar: dataset.avatar,
       intro: dataset.intro,
+      embeddingModelId: dataset.embeddingModelId,
+      embeddingModelName: dataset.embeddingModelName,
+      embeddingDimension: dataset.embeddingDimension,
+      llmModelId: dataset.llmModelId,
+      llmModelName: dataset.llmModelName,
       vectorModel: dataset.vectorModel,
       agentModel: dataset.agentModel,
       chunkSize: dataset.chunkSize,

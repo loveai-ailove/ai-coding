@@ -48,6 +48,9 @@ export async function GET(
       name: collection.name,
       type: collection.type,
       tags: collection.tags,
+      fileExt: collection.fileExt,
+      fileSize: collection.fileSize,
+      fileUrl: collection.fileUrl,
       rawLink: collection.rawLink,
       rawTextLength: collection.rawTextLength,
       hashRawText: collection.hashRawText,
@@ -111,6 +114,7 @@ export async function DELETE(
     if (vectorIds.length > 0) {
       await deleteVectors({
         teamId: user.userId,
+        embeddingModelId: String(dataset.embeddingModelId || "default"),
         ids: vectorIds,
       });
     }

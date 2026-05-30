@@ -22,12 +22,17 @@
     "dotenv": "^16.0.0",
     "ioredis": "^5.11.0",
     "lodash": "^4.18.1",
+    "mammoth": "^1.12.0",
     "minio": "^8.0.7",
     "mongoose": "^9.6.3",
     "nanoid": "^5.1.11",
     "next": "^16.0.0",
+    "node-xlsx": "^0.24.0",
+    "pdf-parse": "^2.4.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -37,6 +42,7 @@
     "@types/react-dom": "^19",
     "prisma": "^7.0.0",
     "tailwindcss": "^4.0.0",
+    "tsx": "^4.22.3",
     "typescript": "^5.0.0"
   }
 }
